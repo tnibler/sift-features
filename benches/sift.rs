@@ -40,7 +40,7 @@ impl OpenCVProcessing {
     }
 }
 
-impl sift::Processing for OpenCVProcessing {
+impl sift_features::Processing for OpenCVProcessing {
     fn gaussian_blur(img: &LumaFImage, sigma: f64) -> LumaFImage {
         use opencv::prelude::*;
         let img = img.clone().into_ndarray2();
@@ -89,7 +89,11 @@ fn load_image() -> image::GrayImage {
 fn sift_with_opencv_preprocess(bencher: Bencher) {
     let img = load_image();
 
-    bencher.bench_local(|| black_box(sift::sift_with_processing::<OpenCVProcessing>(&img, None)));
+    bencher.bench_local(|| {
+        black_box(sift_features::sift_with_processing::<OpenCVProcessing>(
+            &img, None,
+        ))
+    });
 }
 
 #[divan::bench]
@@ -111,7 +115,7 @@ fn opencv_sift(bencher: Bencher) {
 #[divan::bench]
 fn sift_no_preprocess(bencher: Bencher) {
     let img = load_image();
-    let images = sift::precompute_images::<OpenCVProcessing>(&img);
+    let images = sift_features::precompute_images::<OpenCVProcessing>(&img);
 
-    bencher.bench_local(|| black_box(sift::sift_with_precomputed(&images, None)));
+    bencher.bench_local(|| black_box(sift_features::sift_with_precomputed(&images, None)));
 }

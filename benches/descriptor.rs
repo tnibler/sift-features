@@ -20,5 +20,13 @@ fn sift_descriptor(bencher: Bencher) {
     let img: ImageBuffer<Luma<f32>, _> = load_image().convert();
     let img = img.into_ndarray2();
 
-    bencher.bench_local(|| black_box(sift::compute_descriptor(&img.view(), 100., 100., 2.1, 123.)));
+    bencher.bench_local(|| {
+        black_box(sift_features::compute_descriptor(
+            &img.view(),
+            100.,
+            100.,
+            2.1,
+            123.,
+        ))
+    });
 }

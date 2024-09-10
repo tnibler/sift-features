@@ -6,7 +6,7 @@ use opencv::core::Vector as CVVec;
 use opencv::features2d::Feature2DTrait;
 use opencv::prelude::*;
 
-use sift::{KeyPoint, SiftResult};
+use sift_features::{KeyPoint, SiftResult};
 
 fn to_cv_keypoints(kp: &KeyPoint) -> opencv::core::KeyPoint {
     let mut cvkp = opencv::core::KeyPoint::default().unwrap();
@@ -87,13 +87,13 @@ fn main() -> Result<(), ()> {
     let SiftResult {
         keypoints: my_kp1,
         descriptors: my_desc1,
-    } = sift::sift(&img1, None);
+    } = sift_features::sift(&img1, None);
     println!("{} keypoints", my_kp1.len());
 
     let SiftResult {
         keypoints: my_kp2,
         descriptors: my_desc2,
-    } = sift::sift(&img2, None);
+    } = sift_features::sift(&img2, None);
     println!("{} keypoints", my_kp2.len());
 
     write_matches_img(

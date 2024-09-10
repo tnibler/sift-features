@@ -1,6 +1,6 @@
 //! Run sift and do nothing.
 
-use sift::SiftResult;
+use sift_features::SiftResult;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -16,6 +16,6 @@ fn main() {
     let SiftResult {
         keypoints,
         descriptors: _,
-    } = sift::sift(&img1, None);
+    } = sift_features::sift(&img1, None);
     println!("{} keypoints", keypoints.len());
 }
