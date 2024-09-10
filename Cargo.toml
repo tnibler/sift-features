@@ -1,0 +1,36 @@
+[package]
+name = "sift-features"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/tnibler/sift-features"
+description = "Implementation of SIFT image features, compatible with OpenCV"
+license = "MIT"
+readme = "README.md"
+keywords = ["sift", "cv", "image", "descriptor", "feature"]
+categories = ["computer-vision", "science"]
+
+[dependencies]
+imageproc = "0.25.0"
+itertools = "0.13.0"
+image = "0.25.2"
+ndarray = "0.16.1"
+nshare = { version = "0.10.0", features = ["image", "ndarray"] }
+
+[dev-dependencies]
+opencv = "0.92.2"
+serde = { version = "1.0.210", features = ["derive"] }
+ndarray = { version = "0.16.1", features = ["serde"]}
+divan = "0.1.14"
+insta = { version = "1.40.0", features = ["yaml", "redactions"] }
+
+[[bench]]
+name = "sift"
+harness = false
+
+[[bench]]
+name = "descriptor"
+harness = false
+
+[profile.dev.package]
+insta.opt-level = 3
+similar.opt-level = 3
