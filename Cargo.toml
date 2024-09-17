@@ -15,10 +15,9 @@ itertools = "0.13.0"
 image = "0.25.2"
 ndarray = "0.16.1"
 nshare = { version = "0.10.0", features = ["image", "ndarray"] }
-serde = { version = "1.0.210", features = ["derive"], optional = true }
-opencv = { version = "0.92.2", optional = true }
 
 [dev-dependencies]
+serde = { version = "1.0.210", features = ["derive"] }
 serde_json = "1.0.128"
 ndarray = { version = "0.16.1", features = ["serde"] }
 divan = "0.1.14"
@@ -39,4 +38,12 @@ required-features = ["opencv", "serde"]
 
 [[example]]
 name = "match-resized"
+required-features = ["opencv"]
+
+[[example]]
+name = "opencv-compare"
+required-features = ["opencv"]
+
+[[example]]
+name = "opencv-cross-match"
 required-features = ["opencv"]

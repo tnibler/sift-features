@@ -1,8 +1,5 @@
-//! Computes SIFT descriptors for one image with OpenCV, the other with this library and finds
-//! matches between them.
-//!
-//! Command line arguments: IMAGE1 IMAGE2
-//! Output: matches-rust-opencv.jpg
+//! Run this crate's SIFT and OpenCV's on two images and output matches in matches-rust.jpg and
+//! matches-opencv.jpg.
 
 use sift_features::opencv;
 
@@ -12,7 +9,7 @@ use opencv::core::Vector as CVVec;
 use opencv::features2d::Feature2DTrait;
 use opencv::prelude::*;
 
-use sift_features::{KeyPoint, SiftResult};
+use sift_features::{KeyPoint, OpenCVProcessing, SiftResult};
 
 fn to_cv_keypoints(kp: &KeyPoint) -> opencv::core::KeyPoint {
     let mut cvkp = opencv::core::KeyPoint::default().unwrap();
@@ -52,6 +49,13 @@ fn main() -> Result<(), ()> {
     }
     let path1 = &args[1];
     let path2 = &args[2];
+    let img1 = match image::open(path1).unwrap().grayscale() {
+        image::DynamicImage::ImageLuma8(img) => img,
+        _ => {
+            eprintln!("wrong image type");
+            return Err(());
+        }
+    };
     let img2 = match image::open(path2).unwrap().grayscale() {
         image::DynamicImage::ImageLuma8(img) => img,
         _ => {
@@ -68,27 +72,49 @@ fn main() -> Result<(), ()> {
     cvsift
         .detect_and_compute_def(&cvimg1, &opencv::core::no_array(), &mut cvkp1, &mut cvdesc1)
         .unwrap();
+    let mut cvdesc2 = Mat::default();
+    let mut cvkp2 = opencv::core::Vector::new();
+    cvsift
+        .detect_and_compute_def(&cvimg2, &opencv::core::no_array(), &mut cvkp2, &mut cvdesc2)
+        .unwrap();
+    write_matches_img(
+        cvimg1.clone(),
+        cvkp1.clone(),
+        cvdesc1.clone(),
+        cvimg2.clone(),
+        cvkp2,
+        cvdesc2,
+        "matches-opencv.jpg",
+    );
+
+    let SiftResult {
+        keypoints: my_kp1,
+        descriptors: my_desc1,
+    } = sift_features::sift_with_processing::<OpenCVProcessing>(&img1, None);
 
     let SiftResult {
         keypoints: my_kp2,
         descriptors: my_desc2,
-    } = sift_features::sift(&img2, None);
-
-    let my_desc2_f32 = my_desc2.mapv(f32::from);
+    } = sift_features::sift_with_processing::<OpenCVProcessing>(&img2, None);
 
     write_matches_img(
         cvimg1,
-        cvkp1,
-        cvdesc1,
+        my_kp1.into_iter().map(|kp| to_cv_keypoints(&kp)).collect(),
+        Mat::new_rows_cols_with_data(
+            my_desc1.shape()[0] as i32,
+            my_desc1.shape()[1] as i32,
+            my_desc1.as_slice().unwrap(),
+        )
+        .unwrap(),
         cvimg2,
         my_kp2.into_iter().map(|kp| to_cv_keypoints(&kp)).collect(),
         Mat::new_rows_cols_with_data(
-            my_desc2_f32.shape()[0] as i32,
-            my_desc2_f32.shape()[1] as i32,
-            my_desc2_f32.as_slice().unwrap(),
+            my_desc2.shape()[0] as i32,
+            my_desc2.shape()[1] as i32,
+            my_desc2.as_slice().unwrap(),
         )
         .unwrap(),
-        "matches-rust-opencv.jpg",
+        "matches-rust.jpg",
     );
     Ok(())
 }
