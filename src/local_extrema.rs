@@ -218,6 +218,7 @@ unsafe fn local_extrema_avx2(arr: &ArrayView3<f32>, border: usize) -> Vec<(usize
     extrema
 }
 
+// TODO: remove unsafe and eliminate bounds checks in other ways here
 fn local_extrema_fallback(
     arr: &ArrayView3<f32>,
     border: usize,
