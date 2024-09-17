@@ -28,8 +28,11 @@ use image::imageops::{resize, FilterType};
 use image::{GrayImage, ImageBuffer, Luma};
 use imageproc::filter::gaussian_blur_f32;
 use itertools::{izip, Itertools};
+use local_extrema::local_extrema;
 use ndarray::{prelude::*, s, Array2, Array3, Axis};
 use nshare::AsNdarray2;
+
+mod local_extrema;
 
 #[cfg(any(test, feature = "opencv"))]
 mod opencv_processing;
@@ -336,6 +339,9 @@ fn find_extrema_in_dog_img<'a>(
                 .map(move |x_initial| (x_initial, y_initial))
         })
         .collect();
+
+    //let extremum_threshold: f32 = (0.5 * CONTRAST_THRESHOLD / SCALES_PER_OCTAVE as f32).floor();
+    //let extrema: Vec<_> = local_extrema(&dogslice, IMAGE_BORDER as usize, extremum_threshold);
 
     let result_iter = extrema.into_iter().flat_map(move |(x_initial, y_initial)| {
         let dogslice = dog.slice(s![scale_in_octave - 1..scale_in_octave + 2, .., ..]);
