@@ -19,8 +19,7 @@ pub fn local_extrema(
     local_extrema_fallback(arr, border, value_threshold)
 }
 
-// TODO: remove unsafe and eliminate bounds checks in other ways here
-fn local_extrema_fallback(
+pub fn local_extrema_fallback(
     arr: &ArrayView3<f32>,
     border: usize,
     threshold: f32,
@@ -28,75 +27,78 @@ fn local_extrema_fallback(
     assert!(border >= 1);
     assert!(2 * border <= arr.shape()[1]);
     assert!(2 * border <= arr.shape()[2]);
-    let ny = arr.shape()[1];
-    let nx = arr.shape()[2];
-    let mut extrema = Vec::default();
+
     let nz = arr.shape()[0];
     assert!(nz == 3);
+    let ny = arr.shape()[1];
+    let nx = arr.shape()[2];
+
+    // Little bit of a dance to eliminate bounds checks and generate nice code
+    let sl = arr.as_slice().expect("should be contiguous");
+    let (p0, sl) = sl.split_at(nx * ny);
+    let (p1, p2) = sl.split_at(nx * ny);
+    let mut extrema = Vec::default();
+
     for y in border..(ny - border) {
         for x in border..(nx - border) {
-            let val = unsafe { arr.uget((1, y, x)) };
+            let val = p1[(y) * nx + x];
             if val.abs() <= threshold {
                 continue;
             }
-            let c = if val >= &0. {
-                unsafe {
-                    val >= arr.uget((1, y, x - 1))
-                        && val >= arr.uget((1, y, x + 1))
-                        && val >= arr.uget((1, y + 1, x + 1))
-                        && val >= arr.uget((1, y + 1, x))
-                        && val >= arr.uget((1, y + 1, x - 1))
-                        && val >= arr.uget((1, y - 1, x + 1))
-                        && val >= arr.uget((1, y - 1, x))
-                        && val >= arr.uget((1, y - 1, x - 1))
-                        && val >= arr.uget((0, y, x - 1))
-                        && val >= arr.uget((0, y, x))
-                        && val >= arr.uget((0, y, x + 1))
-                        && val >= arr.uget((0, y + 1, x + 1))
-                        && val >= arr.uget((0, y + 1, x))
-                        && val >= arr.uget((0, y + 1, x - 1))
-                        && val >= arr.uget((0, y - 1, x + 1))
-                        && val >= arr.uget((0, y - 1, x))
-                        && val >= arr.uget((0, y - 1, x - 1))
-                        && val >= arr.uget((2, y, x - 1))
-                        && val >= arr.uget((2, y, x))
-                        && val >= arr.uget((2, y, x + 1))
-                        && val >= arr.uget((2, y + 1, x + 1))
-                        && val >= arr.uget((2, y + 1, x))
-                        && val >= arr.uget((2, y + 1, x - 1))
-                        && val >= arr.uget((2, y - 1, x + 1))
-                        && val >= arr.uget((2, y - 1, x))
-                        && val >= arr.uget((2, y - 1, x - 1))
-                }
+            let c = if val >= 0. {
+                val >= p1[(y) * nx + x - 1]
+                    && val >= p1[(y) * nx + x + 1]
+                    && val >= p1[(y + 1) * nx + x + 1]
+                    && val >= p1[(y + 1) * nx + x]
+                    && val >= p1[(y + 1) * nx + x - 1]
+                    && val >= p1[(y - 1) * nx + x + 1]
+                    && val >= p1[(y - 1) * nx + x]
+                    && val >= p1[(y - 1) * nx + x - 1]
+                    && val >= p0[(y) * nx + x - 1]
+                    && val >= p0[(y) * nx + x]
+                    && val >= p0[(y) * nx + x + 1]
+                    && val >= p0[(y + 1) * nx + x + 1]
+                    && val >= p0[(y + 1) * nx + x]
+                    && val >= p0[(y + 1) * nx + x - 1]
+                    && val >= p0[(y - 1) * nx + x + 1]
+                    && val >= p0[(y - 1) * nx + x]
+                    && val >= p0[(y - 1) * nx + x - 1]
+                    && val >= p2[(y) * nx + x - 1]
+                    && val >= p2[(y) * nx + x]
+                    && val >= p2[(y) * nx + x + 1]
+                    && val >= p2[(y + 1) * nx + x + 1]
+                    && val >= p2[(y + 1) * nx + x]
+                    && val >= p2[(y + 1) * nx + x - 1]
+                    && val >= p2[(y - 1) * nx + x + 1]
+                    && val >= p2[(y - 1) * nx + x]
+                    && val >= p2[(y - 1) * nx + x - 1]
             } else {
-                unsafe {
-                    val <= arr.uget((1, y, x - 1))
-                        && val <= arr.uget((1, y, x + 1))
-                        && val <= arr.uget((1, y + 1, x + 1))
-                        && val <= arr.uget((1, y + 1, x))
-                        && val <= arr.uget((1, y + 1, x - 1))
-                        && val <= arr.uget((1, y - 1, x + 1))
-                        && val <= arr.uget((1, y - 1, x))
-                        && val <= arr.uget((1, y - 1, x - 1))
-                        && val <= arr.uget((0, y, x - 1))
-                        && val <= arr.uget((0, y, x))
-                        && val <= arr.uget((0, y, x + 1))
-                        && val <= arr.uget((0, y + 1, x + 1))
-                        && val <= arr.uget((0, y + 1, x))
-                        && val <= arr.uget((0, y + 1, x - 1))
-                        && val <= arr.uget((0, y - 1, x + 1))
-                        && val <= arr.uget((0, y - 1, x))
-                        && val <= arr.uget((0, y - 1, x - 1))
-                        && val <= arr.uget((2, y, x - 1))
-                        && val <= arr.uget((2, y, x))
-                        && val <= arr.uget((2, y, x + 1))
-                        && val <= arr.uget((2, y + 1, x + 1))
-                        && val <= arr.uget((2, y + 1, x))
-                        && val <= arr.uget((2, y + 1, x - 1))
-                        && val <= arr.uget((2, y - 1, x + 1))
-                        && val <= arr.uget((2, y - 1, x))
-                        && val <= arr.uget((2, y - 1, x - 1))
-                }
+                val <= p1[(y) * nx + x - 1]
+                    && val <= p1[(y) * nx + x + 1]
+                    && val <= p1[(y + 1) * nx + x + 1]
+                    && val <= p1[(y + 1) * nx + x]
+                    && val <= p1[(y + 1) * nx + x - 1]
+                    && val <= p1[(y - 1) * nx + x + 1]
+                    && val <= p1[(y - 1) * nx + x]
+                    && val <= p1[(y - 1) * nx + x - 1]
+                    && val <= p0[(y) * nx + x - 1]
+                    && val <= p0[(y) * nx + x]
+                    && val <= p0[(y) * nx + x + 1]
+                    && val <= p0[(y + 1) * nx + x + 1]
+                    && val <= p0[(y + 1) * nx + x]
+                    && val <= p0[(y + 1) * nx + x - 1]
+                    && val <= p0[(y - 1) * nx + x + 1]
+                    && val <= p0[(y - 1) * nx + x]
+                    && val <= p0[(y - 1) * nx + x - 1]
+                    && val <= p2[(y) * nx + x - 1]
+                    && val <= p2[(y) * nx + x]
+                    && val <= p2[(y) * nx + x + 1]
+                    && val <= p2[(y + 1) * nx + x + 1]
+                    && val <= p2[(y + 1) * nx + x]
+                    && val <= p2[(y + 1) * nx + x - 1]
+                    && val <= p2[(y - 1) * nx + x + 1]
+                    && val <= p2[(y - 1) * nx + x]
+                    && val <= p2[(y - 1) * nx + x - 1]
             };
             if c {
                 extrema.push((x, y));

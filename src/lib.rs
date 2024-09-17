@@ -327,12 +327,6 @@ fn find_extrema_in_dog_img<'a>(
     if height < 2 * IMAGE_BORDER || width < 2 * IMAGE_BORDER {
         return Box::new(std::iter::empty());
     }
-    let y_end = height - IMAGE_BORDER;
-    let y_begin = IMAGE_BORDER;
-
-    let x_end = width - IMAGE_BORDER;
-    let x_begin = IMAGE_BORDER;
-    assert!(x_end >= IMAGE_BORDER);
 
     let extremum_threshold: f32 = (0.5 * CONTRAST_THRESHOLD / SCALES_PER_OCTAVE as f32).floor();
     let extrema: Vec<_> = local_extrema(&dogslice, IMAGE_BORDER as usize, extremum_threshold);
@@ -349,8 +343,8 @@ fn find_extrema_in_dog_img<'a>(
             dog.into(),
             ScaleSpacePoint {
                 scale: scale_in_octave,
-                x: x_initial as usize,
-                y: y_initial as usize,
+                x: x_initial,
+                y: y_initial,
             },
         ) {
             Some(r) => r,
@@ -438,77 +432,6 @@ fn find_extrema_in_dog_img<'a>(
         Box::new(kps_with_ref_orientation)
     });
     Box::new(result_iter)
-}
-
-fn point_is_local_extremum(dogslice: ArrayView3<f32>, x: usize, y: usize) -> bool {
-    #[inline(always)]
-    fn values_around(arr: &ArrayView2<f32>, y: usize, x: usize) -> impl Iterator<Item = f32> {
-        [
-            arr[(y - 1, x - 1)],
-            arr[(y - 1, x)],
-            arr[(y - 1, x + 1)],
-            arr[(y, x - 1)],
-            arr[(y, x + 1)],
-            arr[(y + 1, x - 1)],
-            arr[(y + 1, x)],
-            arr[(y + 1, x + 1)],
-        ]
-        .into_iter()
-    }
-
-    assert!(dogslice.shape()[0] == 3);
-    let prev = dogslice.index_axis(Axis(0), 0);
-    let curr = dogslice.index_axis(Axis(0), 1);
-    let next = dogslice.index_axis(Axis(0), 2);
-
-    // Discard extrema with values below this threshold.
-    // This is taken from OpenCV, but Section 3.3 in [4] uses different values.
-    let threshold: f32 = (0.5 * CONTRAST_THRESHOLD / SCALES_PER_OCTAVE as f32).floor();
-
-    assert!(x > 0 && y > 0 && x < curr.shape()[1] && y < curr.shape()[0]);
-
-    let val = curr[(y, x)];
-    if val.abs() <= threshold {
-        return false;
-    } else if val > 0.0 {
-        if val
-            >= values_around(&curr, y, x)
-                .max_by(f32::total_cmp)
-                .expect("sequence not empty")
-            && val
-                >= values_around(&prev, y, x)
-                    .max_by(f32::total_cmp)
-                    .expect("sequence not empty")
-            && val
-                >= values_around(&next, y, x)
-                    .max_by(f32::total_cmp)
-                    .expect("sequence not empty")
-        {
-            let _11p = prev[(y, x)];
-            let _11n = next[(y, x)];
-            return val >= _11p.max(_11n);
-        }
-    } else {
-        debug_assert!(val < 0.0);
-        if val
-            <= values_around(&curr, y, x)
-                .min_by(f32::total_cmp)
-                .expect("sequence not empty")
-            && val
-                <= values_around(&prev, y, x)
-                    .min_by(f32::total_cmp)
-                    .expect("sequence not empty")
-            && val
-                <= values_around(&next, y, x)
-                    .min_by(f32::total_cmp)
-                    .expect("sequence not empty")
-        {
-            let _11p = prev[(y, x)];
-            let _11n = next[(y, x)];
-            return val <= _11p.min(_11n);
-        }
-    }
-    false
 }
 
 #[derive(Copy, Clone)]
