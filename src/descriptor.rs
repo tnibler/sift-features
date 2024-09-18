@@ -295,6 +295,16 @@ unsafe fn histogram_avx2(
         (DESCRIPTOR_N_HISTOGRAMS + 3) * DESCRIPTOR_N_BINS,
         (DESCRIPTOR_N_HISTOGRAMS + 3) * DESCRIPTOR_N_BINS,
     ];
+    let index_offsets = _mm256_set_epi32(
+        ((DESCRIPTOR_N_HISTOGRAMS + 3) * DESCRIPTOR_N_BINS) as i32,
+        ((DESCRIPTOR_N_HISTOGRAMS + 3) * DESCRIPTOR_N_BINS) as i32,
+        ((DESCRIPTOR_N_HISTOGRAMS + 2) * DESCRIPTOR_N_BINS) as i32,
+        ((DESCRIPTOR_N_HISTOGRAMS + 2) * DESCRIPTOR_N_BINS) as i32,
+        DESCRIPTOR_N_BINS as i32,
+        DESCRIPTOR_N_BINS as i32,
+        0,
+        0,
+    );
     let onehalf = _mm256_set1_ps(0.5);
     let onef = _mm256_set1_ps(1.);
     let twof = _mm256_set1_ps(2.);
@@ -366,15 +376,6 @@ unsafe fn histogram_avx2(
 
         let ori_floor = _mm256_cvttps_epi32(ori_floor);
 
-        let ori_floor = {
-            let mut v = [0_i32; 8];
-            _mm256_storeu_si256(
-                transmute::<*mut i32, *mut __m256i>(v.as_mut_ptr()),
-                ori_floor,
-            );
-            v
-        };
-
         let row_floor_p1 = {
             let mut v = [0_i32; 8];
             _mm256_storeu_si256(
@@ -393,27 +394,31 @@ unsafe fn histogram_avx2(
         };
         let nhist = nhist as usize;
         let nbins = nbins as usize;
+        let mut permute = _mm256_setzero_si256();
         for j in 0..8 {
             let ori_p1s = _mm256_set_epi32(1, 0, 1, 0, 1, 0, 1, 0);
-            let ori = _mm256_and_si256(
-                _mm256_add_epi32(_mm256_set1_epi32(ori_floor[j]), ori_p1s),
-                mod_nbins_mask,
+            let ori_single = _mm256_permutevar8x32_epi32(ori_floor, permute);
+            let ori_idx_offset =
+                _mm256_and_si256(_mm256_add_epi32(ori_single, ori_p1s), mod_nbins_mask);
+            let idx_base = _mm256_set1_epi32(
+                row_floor_p1[j] * (nhist as i32 + 2) * nbins as i32
+                    + col_floor_p1[j] * nbins as i32,
             );
-            let ori = {
+            let idx = _mm256_add_epi32(_mm256_add_epi32(idx_base, index_offsets), ori_idx_offset);
+            let idx = {
                 let mut v = [0_i32; 8];
-                _mm256_storeu_si256(transmute::<*mut i32, *mut __m256i>(v.as_mut_ptr()), ori);
+                _mm256_storeu_si256(transmute::<*mut i32, *mut __m256i>(v.as_mut_ptr()), idx);
                 v
             };
-            let idx_base =
-                row_floor_p1[j] as usize * (nhist + 2) * nbins + col_floor_p1[j] as usize * nbins;
-            hist[idx_base + IDX_OFFSETS[0] + ori[0] as usize] += buf000[j];
-            hist[idx_base + IDX_OFFSETS[1] + ori[1] as usize] += buf001[j];
-            hist[idx_base + IDX_OFFSETS[2] + ori[2] as usize] += buf010[j];
-            hist[idx_base + IDX_OFFSETS[3] + ori[3] as usize] += buf011[j];
-            hist[idx_base + IDX_OFFSETS[4] + ori[4] as usize] += buf100[j];
-            hist[idx_base + IDX_OFFSETS[5] + ori[5] as usize] += buf101[j];
-            hist[idx_base + IDX_OFFSETS[6] + ori[6] as usize] += buf110[j];
-            hist[idx_base + IDX_OFFSETS[7] + ori[7] as usize] += buf111[j];
+            hist[idx[0] as usize] += buf000[j];
+            hist[idx[1] as usize] += buf001[j];
+            hist[idx[2] as usize] += buf010[j];
+            hist[idx[3] as usize] += buf011[j];
+            hist[idx[4] as usize] += buf100[j];
+            hist[idx[5] as usize] += buf101[j];
+            hist[idx[6] as usize] += buf110[j];
+            hist[idx[7] as usize] += buf111[j];
+            permute = _mm256_add_epi32(permute, _mm256_set1_epi32(1));
         }
     }
 }
