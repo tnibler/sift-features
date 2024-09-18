@@ -1,8 +1,8 @@
 use aligned_vec::{avec, AVec, ConstAlign};
-use itertools::{izip, Itertools as _};
+use itertools::{izip, Itertools};
 use ndarray::{s, Array3, ArrayView2, ArrayViewMut3};
 
-use crate::{DESCRIPTOR_N_BINS, DESCRIPTOR_N_HISTOGRAMS, DESCRIPTOR_SIZE, LAMBDA_DESCR};
+use crate::{atan2, DESCRIPTOR_N_BINS, DESCRIPTOR_N_HISTOGRAMS, DESCRIPTOR_SIZE, LAMBDA_DESCR};
 
 const BIN_ANGLE_STEP: f32 = DESCRIPTOR_N_BINS as f32 / 360.0;
 
@@ -66,6 +66,10 @@ pub fn compute_descriptor(
                     let dx = img[(abs_y, abs_x + 1)] - img[(abs_y, abs_x - 1)];
                     let dy = img[(abs_y - 1, abs_x)] - img[(abs_y + 1, abs_x)];
 
+                    if dx == 0. && dy == 0. {
+                        return None;
+                    }
+
                     // Samples contribute less to histogram as they get further away.
                     // Exponents in Eq. (27) in [4]
                     let weight = col_rotated.powi(2) + row_rotated.powi(2);
@@ -92,16 +96,23 @@ pub fn compute_descriptor(
     let weights: AVec<_, ConstAlign<ALIGN>> =
         AVec::from_iter(ALIGN, weights.iter().map(|x| (x * weight_scale).exp()));
     // Gradient orientations in patch normalized wrt to the keypoint's reference orientation.
+    //let normalized_orienations: AVec<_, ConstAlign<ALIGN>> = AVec::from_iter(
+    //    ALIGN,
+    //    gradients_x
+    //        .into_iter()
+    //        .zip(gradients_y.iter())
+    //        .map(|(x, y)| {
+    //            let x: f64 = *x as f64;
+    //            let y: f64 = *y as f64;
+    //            ((y.atan2(x).to_degrees() + 360.0) % 360.0) as f32 - orientation
+    //        }),
+    //);
+    let atans = atan2::atan2(&gradients_x, &gradients_y);
     let normalized_orienations: AVec<_, ConstAlign<ALIGN>> = AVec::from_iter(
         ALIGN,
-        gradients_x
+        atans
             .into_iter()
-            .zip(gradients_y.iter())
-            .map(|(x, y)| {
-                let x: f64 = *x as f64;
-                let y: f64 = *y as f64;
-                ((y.atan2(x).to_degrees() + 360.0) % 360.0) as f32 - orientation
-            }),
+            .map(|angle| ((angle.to_degrees() + 360.0) % 360.0) - orientation),
     );
     // Gradient magnitudes
     let magnitude: AVec<_, ConstAlign<ALIGN>> = AVec::from_iter(
@@ -121,26 +132,24 @@ pub fn compute_descriptor(
         ArrayViewMut3::from_shape((n_hist + 2, n_hist + 2, DESCRIPTOR_N_BINS), &mut hist_buf)
             .expect("shape matches");
 
-    #[allow(unused)]
-    let tail: usize = 0;
-
     #[cfg(target_arch = "x86_64")]
-    let tail: usize = row_bins.len() - (row_bins.len() % 8);
     #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                histogram_avx2(
-                    &row_bins[..tail],
-                    &col_bins[..tail],
-                    &normalized_orienations[..tail],
-                    &magnitude[..tail],
-                    &weights[..tail],
-                    &mut hist.view_mut(),
-                );
-            }
+    let tail = if is_x86_feature_detected!("avx2") {
+        let tail: usize = row_bins.len() - (row_bins.len() % 8);
+        unsafe {
+            histogram_avx2(
+                &row_bins[..tail],
+                &col_bins[..tail],
+                &normalized_orienations[..tail],
+                &magnitude[..tail],
+                &weights[..tail],
+                &mut hist.view_mut(),
+            );
         }
-    }
+        tail
+    } else {
+        0
+    };
 
     // Spread each sample point's contribution to its 8 neighbouring histograms based on its distance
     // from the histogram window's center and weighted by the sample's gradient magnitude.

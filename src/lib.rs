@@ -23,6 +23,7 @@
 use std::cmp::min;
 use std::f32::consts::PI as PI32;
 
+use aligned_vec::{AVec, ConstAlign};
 use image::buffer::ConvertBuffer;
 use image::imageops::{resize, FilterType};
 use image::{GrayImage, ImageBuffer, Luma};
@@ -31,6 +32,7 @@ use itertools::{izip, Itertools};
 use ndarray::{prelude::*, s, Array2, Array3, Axis};
 use nshare::AsNdarray2;
 
+mod atan2;
 mod descriptor;
 mod local_extrema;
 
@@ -599,53 +601,69 @@ fn gradient_direction_histogram(
     // Denominator of exponent in Eq. (20) in [4], used to compute weights
     let grad_weight_scale = -1.0 / (2.0 * sigma * sigma);
 
+    const ALIGN: usize = 32;
+    type AlignVec = AVec<f32, ConstAlign<ALIGN>>;
+
     // x/y gradients are weighted by their distance from the point at (row, col).
-    // weights holds the exponent of the weighting factor in Eq. (20) in [4]
-    let (grads_x, grads_y, grad_weights): (Vec<f32>, Vec<f32>, Vec<f32>) = (-radius..=radius)
-        .filter_map(|y_patch| {
-            if y_patch <= -(y as i32) {
-                return None;
-            }
-            let y: i64 = i64::from(y) + i64::from(y_patch);
-            if y <= 0 || y as usize >= img.shape()[0] - 1 {
-                return None;
-            }
-            Some((y as usize, y_patch))
-        })
-        .flat_map(|(y_img, y_patch)| {
-            (-radius..=radius)
-                .filter_map(|x_patch| {
-                    if x_patch <= -(x as i32) {
-                        return None;
-                    }
-                    let x = x as isize + x_patch as isize;
-                    if x <= 0 || x as usize >= img.shape()[1] - 1 {
-                        return None;
-                    }
-                    Some((x as usize, x_patch))
-                })
-                .map(move |(x_img, x_patch)| {
-                    let dx = img[(y_img, x_img + 1)] - img[(y_img, x_img - 1)];
-                    let dy = img[(y_img - 1, x_img)] - img[(y_img + 1, x_img)];
-                    // squared euclidian distance from (row, col) * weighting factor
-                    let w = (y_patch * y_patch + x_patch * x_patch) as f32 * grad_weight_scale;
-                    (dx, dy, w)
-                })
-        })
-        .multiunzip();
+    // grad_weights holds the exponent of the weighting factor in Eq. (20) in [4]
+    let (grads_x, grads_y, grad_weights): (AlignVec, AlignVec, AlignVec) = {
+        let mut grads_x: AVec<f32, _> = AVec::with_capacity(ALIGN, (4 * radius * radius) as usize);
+        let mut grads_y: AVec<f32, _> = AVec::with_capacity(ALIGN, (4 * radius * radius) as usize);
+        let mut grad_weights: AVec<f32, _> =
+            AVec::with_capacity(ALIGN, (4 * radius * radius) as usize);
+        (-radius..=radius)
+            .filter_map(|y_patch| {
+                if y_patch <= -(y as i32) {
+                    return None;
+                }
+                let y: i64 = i64::from(y) + i64::from(y_patch);
+                if y <= 0 || y as usize >= img.shape()[0] - 1 {
+                    return None;
+                }
+                Some((y as usize, y_patch))
+            })
+            .map(|(y_img, y_patch)| {
+                (-radius..=radius)
+                    .filter_map(|x_patch| {
+                        if x_patch <= -(x as i32) {
+                            return None;
+                        }
+                        let x = x as isize + x_patch as isize;
+                        if x <= 0 || x as usize >= img.shape()[1] - 1 {
+                            return None;
+                        }
+                        Some((x as usize, x_patch))
+                    })
+                    .filter_map(move |(x_img, x_patch)| {
+                        let dx = img[(y_img, x_img + 1)] - img[(y_img, x_img - 1)];
+                        let dy = img[(y_img - 1, x_img)] - img[(y_img + 1, x_img)];
+                        // The point (0, 0) is not handled by atan2
+                        if dx == 0. && dy == 0. {
+                            return None;
+                        }
+                        // squared euclidian distance from (row, col) * weighting factor
+                        let w = (y_patch * y_patch + x_patch * x_patch) as f32 * grad_weight_scale;
+                        Some((dx, dy, w))
+                    })
+            })
+            .flatten()
+            .for_each(|(dx, dy, w)| {
+                grads_x.push(dx);
+                grads_y.push(dy);
+                grad_weights.push(w);
+            });
+        (grads_x, grads_y, grad_weights)
+    };
 
     // Finalizing the term in Eq. (20) in [4]
     let grad_weights = grad_weights.into_iter().map(|x| x.exp());
     // gradient magnitudes
     let magnitudes = grads_x
         .iter()
-        .zip(&grads_y)
+        .zip(grads_y.iter())
         .map(|(x, y)| (x * x + y * y).sqrt());
-    let orientations = grads_x
-        .iter()
-        .copied()
-        .zip(&grads_y)
-        .map(|(x, y)| f64::from(*y).atan2(x.into()) as f32);
+
+    let orientations = atan2::atan2(&grads_x, &grads_y);
 
     // Range of angles (radians) assigned to one histogram bin
     let bin_angle_step = n_bins as f32 / (PI32 * 2.);
