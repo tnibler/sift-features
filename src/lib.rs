@@ -124,7 +124,7 @@ const LAMBDA_DESCR: f32 = 3.0;
 const DESCRIPTOR_N_HISTOGRAMS: usize = 4;
 // See Section 4.2 in [4]
 const DESCRIPTOR_N_BINS: usize = 8;
-const DESCRIPTOR_SIZE: usize =
+pub const DESCRIPTOR_SIZE: usize =
     DESCRIPTOR_N_HISTOGRAMS * DESCRIPTOR_N_HISTOGRAMS * DESCRIPTOR_N_BINS;
 
 type LumaFImage = ImageBuffer<Luma<f32>, Vec<f32>>;
@@ -694,22 +694,20 @@ fn compute_descriptors(scale_space: &[Array3<f32>], keypoints: &[SiftKeyPoint]) 
     desc.rows_mut()
         .into_iter()
         .zip(keypoints)
-        .for_each(|(row, kp)| {
+        .for_each(|(mut row, kp)| {
             let img = &scale_space[kp.octave].index_axis(Axis(0), kp.scale);
             let angle = 360.0 - kp.angle;
             // δ_o in Eq. (9) in [4] with δ_min = 2
             let octave_scale_factor = 2_f32.powi(-(kp.octave as i32));
             let kp_size = kp.size * octave_scale_factor;
-            let kpdesc = compute_descriptor(
+            compute_descriptor(
                 img,
                 kp.x * octave_scale_factor,
                 kp.y * octave_scale_factor,
                 kp_size,
                 angle,
+                row.as_slice_mut().expect("is contiguous"),
             );
-            row.into_iter()
-                .zip(kpdesc)
-                .for_each(|(el, descriptor_component)| *el = descriptor_component);
         });
     desc
 }
