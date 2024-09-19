@@ -480,26 +480,38 @@ fn interpolate_extremum(
     }: ScaleSpacePoint,
 ) -> Option<InterpolateResult> {
     assert!(dog.shape()[0] == SCALES_PER_OCTAVE + 2);
+    assert!(0 < x && x < dog.shape()[2] - 1);
+    assert!(0 < y && y < dog.shape()[1] - 1);
     for _ in 0..MAX_INTERPOLATION_STEPS {
         let prev = &dog.slice(s![scale - 1, .., ..]);
         let curr = &dog.slice(s![scale, .., ..]);
         let next = &dog.slice(s![scale + 1, .., ..]);
 
         // 3D Gradient
-        let g1 = (next[(y, x)] - prev[(y, x)]) / 2.;
-        let g2 = (curr[(y + 1, x)] - curr[(y - 1, x)]) / 2.;
-        let g3 = (curr[(y, x + 1)] - curr[(y, x - 1)]) / 2.;
+        let g1 = unsafe { (next.uget((y, x)) - prev.uget((y, x))) / 2. };
+        let g2 = unsafe { (curr.uget((y + 1, x)) - curr.uget((y - 1, x))) / 2. };
+        let g3 = unsafe { (curr.uget((y, x + 1)) - curr.uget((y, x - 1))) / 2. };
 
         // Hessian matrix
-        let value2x = curr[(y, x)] * 2.;
-        let h11 = next[(y, x)] + prev[(y, x)] - value2x;
-        let h12 = (next[(y + 1, x)] - next[(y - 1, x)] - prev[(y + 1, x)] + prev[(y - 1, x)]) / 4.;
-        let h13 = (next[(y, x + 1)] - next[(y, x - 1)] - prev[(y, x + 1)] + prev[(y, x - 1)]) / 4.;
-        let h22 = curr[(y + 1, x)] + curr[(y - 1, x)] - value2x;
-        let h33 = curr[(y, x + 1)] + curr[(y, x - 1)] - value2x;
-        let h23 = (curr[(y + 1, x + 1)] - curr[(y + 1, x - 1)] - curr[(y - 1, x + 1)]
-            + curr[(y - 1, x - 1)])
-            / 4.;
+        let value2x = unsafe { curr.uget((y, x)) * 2. };
+        let h11 = unsafe { next.uget((y, x)) + prev.uget((y, x)) - value2x };
+        let h12 = unsafe {
+            (next.uget((y + 1, x)) - next.uget((y - 1, x)) - prev.uget((y + 1, x))
+                + prev.uget((y - 1, x)))
+                / 4.
+        };
+        let h13 = unsafe {
+            (next.uget((y, x + 1)) - next.uget((y, x - 1)) - prev.uget((y, x + 1))
+                + prev.uget((y, x - 1)))
+                / 4.
+        };
+        let h22 = unsafe { curr.uget((y + 1, x)) + curr.uget((y - 1, x)) - value2x };
+        let h33 = unsafe { curr.uget((y, x + 1)) + curr.uget((y, x - 1)) - value2x };
+        let h23 = unsafe {
+            (curr.uget((y + 1, x + 1)) - curr.uget((y + 1, x - 1)) - curr.uget((y - 1, x + 1))
+                + curr.uget((y - 1, x - 1)))
+                / 4.
+        };
 
         // Solve for α* as shown in Eq. (14) by inverting the hessian
         let det = h11 * h22 * h33 - h11 * h23 * h23 - h12 * h12 * h33 + 2. * h12 * h13 * h23
