@@ -135,9 +135,11 @@ pub fn compute_descriptor(
     let atans = atan2::atan2(&gradients_x, &gradients_y);
     let normalized_orienations: AVec<_, ConstAlign<ALIGN>> = AVec::from_iter(
         ALIGN,
-        atans
-            .into_iter()
-            .map(|angle| ((angle.to_degrees() + 360.0) % 360.0) - orientation),
+        atans.into_iter().map(|angle| {
+            let deg = angle.to_degrees();
+            let deg = if deg < 0. { deg + 360. } else { deg };
+            deg - orientation
+        }),
     );
     // Gradient magnitudes
     let magnitude: AVec<_, ConstAlign<ALIGN>> = AVec::from_iter(
