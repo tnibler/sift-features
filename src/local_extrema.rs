@@ -1,10 +1,12 @@
 use ndarray::ArrayView3;
 
-pub fn local_extrema(
+pub fn local_extrema<T, CallerData: Copy>(
     arr: &ArrayView3<f32>,
     border: usize,
     value_threshold: f32,
-) -> Vec<(usize, usize)> {
+    discard_or_process: impl Fn(usize, usize, CallerData, &mut Vec<T>),
+    caller_data: CallerData,
+) -> Vec<T> {
     assert!(border >= 1);
     assert!(2 * border <= arr.shape()[1]);
     assert!(2 * border <= arr.shape()[2]);
@@ -13,17 +15,33 @@ pub fn local_extrema(
     #[cfg(target_arch = "x86_64")]
     {
         if std::arch::is_x86_feature_detected!("avx2") {
-            return unsafe { local_extrema_avx2(arr, border, value_threshold) };
+            return unsafe {
+                local_extrema_avx2(
+                    arr,
+                    border,
+                    value_threshold,
+                    discard_or_process,
+                    caller_data,
+                )
+            };
         }
     }
-    local_extrema_fallback(arr, border, value_threshold)
+    local_extrema_fallback(
+        arr,
+        border,
+        value_threshold,
+        discard_or_process,
+        caller_data,
+    )
 }
 
-pub fn local_extrema_fallback(
+pub fn local_extrema_fallback<T, CallerData: Copy>(
     arr: &ArrayView3<f32>,
     border: usize,
     threshold: f32,
-) -> Vec<(usize, usize)> {
+    discard_or_process: impl Fn(usize, usize, CallerData, &mut Vec<T>),
+    caller_data: CallerData,
+) -> Vec<T> {
     assert!(border >= 1);
     assert!(2 * border <= arr.shape()[1]);
     assert!(2 * border <= arr.shape()[2]);
@@ -101,7 +119,7 @@ pub fn local_extrema_fallback(
                     && val <= p2[(y - 1) * nx + x - 1]
             };
             if c {
-                extrema.push((x, y));
+                discard_or_process(x, y, caller_data, &mut extrema);
             }
         }
     }
@@ -109,11 +127,13 @@ pub fn local_extrema_fallback(
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn local_extrema_avx2(
+unsafe fn local_extrema_avx2<T, CallerData: Copy>(
     arr: &ArrayView3<f32>,
     border: usize,
     value_threshold: f32,
-) -> Vec<(usize, usize)> {
+    discard_or_process: impl Fn(usize, usize, CallerData, &mut Vec<T>),
+    caller_data: CallerData,
+) -> Vec<T> {
     assert!(border >= 1);
     assert!(2 * border <= arr.shape()[1]);
     assert!(2 * border <= arr.shape()[2]);
@@ -121,7 +141,7 @@ unsafe fn local_extrema_avx2(
     let ny = arr.shape()[1];
     let nz = arr.shape()[0];
     assert!(nz == 3);
-    let mut scratch = vec![false; nx * 4];
+    let mut scratch = vec![false; 4 * 1024];
     // a <= 0: a <= b => a - b <= 0
     // a >= 0: a >= b => a - b >= 0
     // a-b, shr 31,  not mask with sign bit
@@ -131,7 +151,7 @@ unsafe fn local_extrema_avx2(
     let p2 = arr.as_slice().unwrap()[(2 * ny * nx)..(3 * ny * nx)].as_ptr();
     let ny = arr.shape()[1] as isize;
     let nx = arr.shape()[2] as isize;
-    let mut extrema: Vec<(usize, usize)> = Vec::default();
+    let mut extrema: Vec<T> = Vec::default();
     let mut buf_idx: usize = 0;
     let mut buf_start: usize = (nx as usize * border) + border;
     let vvalue_threshold = _mm256_set1_ps(value_threshold);
@@ -140,23 +160,23 @@ unsafe fn local_extrema_avx2(
         for y in (border as isize)..(ny - border as isize) {
             let mut x = border as isize;
 
-            if (buf_idx + nx as usize) >= scratch.len() {
-                scratch
-                    .iter()
-                    .take(buf_idx)
-                    .enumerate()
-                    .for_each(|(idx, extr)| {
-                        if *extr {
-                            let ey = (buf_start + idx) / (nx as usize);
-                            let ex = (buf_start + idx) % nx as usize; // TODO: replace modulo
-                            extrema.push((ex, ey));
-                        }
-                    });
-                buf_start = (y * nx + x) as usize;
-                buf_idx = 0;
-                scratch.fill(false);
-            }
             while x + 8 < nx - border as isize {
+                if (buf_idx + nx as usize) >= scratch.len() {
+                    scratch
+                        .iter()
+                        .take(buf_idx)
+                        .enumerate()
+                        .for_each(|(idx, extr)| {
+                            if *extr {
+                                let ey = (buf_start + idx) / (nx as usize);
+                                let ex = (buf_start + idx) % nx as usize; // TODO: replace modulo
+                                discard_or_process(ex, ey, caller_data, &mut extrema);
+                            }
+                        });
+                    buf_start = (y * nx + x) as usize;
+                    buf_idx = 0;
+                    scratch.fill(false);
+                }
                 let val = _mm256_loadu_ps(p1.offset(y * nx + x));
 
                 // zero out sign bit to take absolute value
@@ -327,7 +347,7 @@ unsafe fn local_extrema_avx2(
             if *extr {
                 let ey = (buf_start + idx) / (nx as usize);
                 let ex = (buf_start + idx) - ey * nx as usize;
-                extrema.push((ex, ey));
+                discard_or_process(ex, ey, caller_data, &mut extrema);
             }
         });
     extrema

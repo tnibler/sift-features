@@ -349,109 +349,121 @@ fn find_extrema_in_dog_img<'a>(
     }
 
     let extremum_threshold: f32 = (0.5 * CONTRAST_THRESHOLD / SCALES_PER_OCTAVE as f32).floor();
-    let extrema: Vec<_> = local_extrema(&dogslice, IMAGE_BORDER as usize, extremum_threshold);
+    let extrema = local_extrema(
+        &dogslice,
+        IMAGE_BORDER as usize,
+        extremum_threshold,
+        discard_or_interpolate_extremum,
+        (&dog.view(), scale_space, octave, scale_in_octave),
+    );
 
-    let result_iter = extrema.into_iter().flat_map(move |(x_initial, y_initial)| {
-        let dogslice = dog.slice(s![scale_in_octave - 1..scale_in_octave + 2, .., ..]);
-        assert!(dogslice.shape()[0] == 3);
-        let InterpolateResult {
-            offset_scale,
-            offset_x,
-            offset_y,
-            point,
-        } = match interpolate_extremum(
-            dog.into(),
-            ScaleSpacePoint {
-                scale: scale_in_octave,
-                x: x_initial,
-                y: y_initial,
-            },
-        ) {
-            Some(r) => r,
-            None => return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _>>,
-        };
+    Box::new(extrema.into_iter())
+}
 
-        let dogslice = dog.slice(s![(point.scale - 1)..(point.scale + 2), .., ..]);
-        let curr = dogslice.index_axis(Axis(0), 1);
-        // discard low contrast extrema
-        let contrast =
-            extremum_contrast(dogslice, point.x, point.y, offset_scale, offset_x, offset_y).abs();
+fn discard_or_interpolate_extremum(
+    x_initial: usize,
+    y_initial: usize,
+    (dog, scale_space, octave, scale_in_octave): (&ArrayView3<f32>, &[Array3<f32>], usize, usize),
+    out_keypoints: &mut Vec<SiftKeyPoint>,
+) {
+    let dogslice = dog.slice(s![scale_in_octave - 1..scale_in_octave + 2, .., ..]);
+    assert!(dogslice.shape()[0] == 3);
+    let InterpolateResult {
+        offset_scale,
+        offset_x,
+        offset_y,
+        point,
+    } = match interpolate_extremum(
+        dog.into(),
+        ScaleSpacePoint {
+            scale: scale_in_octave,
+            x: x_initial,
+            y: y_initial,
+        },
+    ) {
+        Some(r) => r,
+        None => return,
+    };
 
-        if contrast * SCALES_PER_OCTAVE as f32 <= CONTRAST_THRESHOLD {
-            return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _>>;
-        }
+    let dogslice = dog.slice(s![(point.scale - 1)..(point.scale + 2), .., ..]);
+    let curr = dogslice.index_axis(Axis(0), 1);
+    // discard low contrast extrema
+    let contrast =
+        extremum_contrast(dogslice, point.x, point.y, offset_scale, offset_x, offset_y).abs();
 
-        // Discard extrema located on edges
-        if extremum_is_on_edge(curr, point) {
-            return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _>>;
-        }
+    if contrast * SCALES_PER_OCTAVE as f32 <= CONTRAST_THRESHOLD {
+        return;
+    }
 
-        let octave_scale_factor = 2_f32.powi(octave as i32);
+    // Discard extrema located on edges
+    if extremum_is_on_edge(curr, point) {
+        return;
+    }
 
-        // Called sigma in [4]
-        let kp_scale = SIGMA_MIN as f32
-            * 2_f32.powf((point.scale as f32 + offset_scale) / SCALES_PER_OCTAVE as f32)
-            * 2.;
+    let octave_scale_factor = 2_f32.powi(octave as i32);
 
-        let kp_x = (point.x as f32 + offset_x) * octave_scale_factor;
-        let kp_y = (point.y as f32 + offset_y) * octave_scale_factor;
-        // Side length of patch over which gradient orientation histogram is computed.
-        // See Eq. (19) in [4]
-        let radius: i32 = (3. * ORIENTATION_HISTOGRAM_RADIUS * kp_scale).round() as i32;
-        let hist = gradient_direction_histogram(
-            scale_space[octave].slice(s![point.scale, .., ..]),
-            point.x as u32,
-            point.y as u32,
-            radius,
-            LAMBDA_ORI * kp_scale,
-            ORIENTATION_HISTOGRAM_BINS,
-        );
-        let histogram_max = hist
-            .iter()
-            .copied()
-            .max_by(f32::total_cmp)
-            .expect("vec is not empty");
-        let localmax_threshold = histogram_max * ORIENTATION_HISTOGRAM_LOCALMAX_RATIO;
+    // Called sigma in [4]
+    let kp_scale = SIGMA_MIN as f32
+        * 2_f32.powf((point.scale as f32 + offset_scale) / SCALES_PER_OCTAVE as f32)
+        * 2.;
 
-        // Extract keypoint reference orientations, Section 4.1.C in [4]
-        let kps_with_ref_orientation = (0..hist.len()).filter_map(move |k| {
-            // h_k- and h_k+ in [4].
-            // Histogram indices wrap around since bins correspond to angles.
-            let k_minus = if k > 0 { k - 1 } else { hist.len() - 1 };
-            let k_plus = if k < hist.len() - 1 { k + 1 } else { 0 };
-            let is_local_max = hist[k] > hist[k_minus] && hist[k] > hist[k_plus];
-            let is_close_to_global_max = hist[k] >= localmax_threshold;
-            if is_local_max && is_close_to_global_max {
-                // argmax of the quadratic function interpolating h_k-, h_k, h_k+
-                // See Eq. (23) in [4]
-                let interp =
-                    (hist[k_minus] - hist[k_plus]) / (hist[k_minus] - 2.0 * hist[k] + hist[k_plus]);
-                let bin: f32 = k as f32 + 0.5 * interp;
-                let bin = if bin < 0.0 {
-                    hist.len() as f32 + bin
-                } else if bin >= hist.len() as f32 {
-                    bin - hist.len() as f32
-                } else {
-                    bin
-                };
-                // The angles are shuffled around to match OpenCV
-                let kp_angle: f32 = 360.0 - (360.0 / hist.len() as f32) * bin;
-                Some(SiftKeyPoint {
-                    x: kp_x,
-                    y: kp_y,
-                    size: kp_scale * octave_scale_factor,
-                    response: contrast,
-                    octave,
-                    scale: point.scale,
-                    angle: kp_angle,
-                })
+    let kp_x = (point.x as f32 + offset_x) * octave_scale_factor;
+    let kp_y = (point.y as f32 + offset_y) * octave_scale_factor;
+    // Side length of patch over which gradient orientation histogram is computed.
+    // See Eq. (19) in [4]
+    let radius: i32 = (3. * ORIENTATION_HISTOGRAM_RADIUS * kp_scale).round() as i32;
+    let hist = gradient_direction_histogram(
+        scale_space[octave].slice(s![point.scale, .., ..]),
+        point.x as u32,
+        point.y as u32,
+        radius,
+        LAMBDA_ORI * kp_scale,
+        ORIENTATION_HISTOGRAM_BINS,
+    );
+    let histogram_max = hist
+        .iter()
+        .copied()
+        .max_by(f32::total_cmp)
+        .expect("vec is not empty");
+    let localmax_threshold = histogram_max * ORIENTATION_HISTOGRAM_LOCALMAX_RATIO;
+
+    // Extract keypoint reference orientations, Section 4.1.C in [4]
+    let kps_with_ref_orientation = (0..hist.len()).filter_map(move |k| {
+        // h_k- and h_k+ in [4].
+        // Histogram indices wrap around since bins correspond to angles.
+        let k_minus = if k > 0 { k - 1 } else { hist.len() - 1 };
+        let k_plus = if k < hist.len() - 1 { k + 1 } else { 0 };
+        let is_local_max = hist[k] > hist[k_minus] && hist[k] > hist[k_plus];
+        let is_close_to_global_max = hist[k] >= localmax_threshold;
+        if is_local_max && is_close_to_global_max {
+            // argmax of the quadratic function interpolating h_k-, h_k, h_k+
+            // See Eq. (23) in [4]
+            let interp =
+                (hist[k_minus] - hist[k_plus]) / (hist[k_minus] - 2.0 * hist[k] + hist[k_plus]);
+            let bin: f32 = k as f32 + 0.5 * interp;
+            let bin = if bin < 0.0 {
+                hist.len() as f32 + bin
+            } else if bin >= hist.len() as f32 {
+                bin - hist.len() as f32
             } else {
-                None
-            }
-        });
-        Box::new(kps_with_ref_orientation)
+                bin
+            };
+            // The angles are shuffled around to match OpenCV
+            let kp_angle: f32 = 360.0 - (360.0 / hist.len() as f32) * bin;
+            Some(SiftKeyPoint {
+                x: kp_x,
+                y: kp_y,
+                size: kp_scale * octave_scale_factor,
+                response: contrast,
+                octave,
+                scale: point.scale,
+                angle: kp_angle,
+            })
+        } else {
+            None
+        }
     });
-    Box::new(result_iter)
+    out_keypoints.extend(kps_with_ref_orientation);
 }
 
 #[derive(Copy, Clone)]
