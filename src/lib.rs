@@ -34,6 +34,7 @@ use nshare::AsNdarray2;
 
 mod atan2;
 mod descriptor;
+mod exp;
 mod local_extrema;
 
 use local_extrema::local_extrema;
@@ -302,6 +303,19 @@ fn find_keypoints<'a>(
     dogs: &'a [Array3<f32>],
 ) -> impl Iterator<Item = SiftKeyPoint> + 'a {
     assert!(scale_space.len() == n_octaves);
+    //let mut v = Vec::default();
+    //for octave in 0..n_octaves {
+    //    let dog = &dogs[octave];
+    //    for scale_in_octave in 1..=SCALES_PER_OCTAVE {
+    //        v.extend(find_extrema_in_dog_img(
+    //            dog,
+    //            scale_space,
+    //            octave,
+    //            scale_in_octave,
+    //        ));
+    //    }
+    //}
+    //v.into_iter()
     (0..n_octaves).flat_map(move |octave| {
         let dog = &dogs[octave];
         assert!(dog.shape()[0] == SCALES_PER_OCTAVE + 2);
@@ -622,7 +636,7 @@ fn gradient_direction_histogram(
                 }
                 Some((y as usize, y_patch))
             })
-            .map(|(y_img, y_patch)| {
+            .flat_map(|(y_img, y_patch)| {
                 (-radius..=radius)
                     .filter_map(|x_patch| {
                         if x_patch <= -(x as i32) {
@@ -646,7 +660,6 @@ fn gradient_direction_histogram(
                         Some((dx, dy, w))
                     })
             })
-            .flatten()
             .for_each(|(dx, dy, w)| {
                 grads_x.push(dx);
                 grads_y.push(dy);
@@ -656,7 +669,7 @@ fn gradient_direction_histogram(
     };
 
     // Finalizing the term in Eq. (20) in [4]
-    let grad_weights = grad_weights.into_iter().map(|x| x.exp());
+    let grad_weights = exp::exp(&grad_weights);
     // gradient magnitudes
     let magnitudes = grads_x
         .iter()
@@ -691,7 +704,7 @@ fn gradient_direction_histogram(
     // raw_hist has length n_bins + 4 because the convolution is circular/cyclic and  wraps around,
     // so we copy the first and last 2 values to the other end of the histogram to get this wrapping.
     let mut raw_hist = vec![0.0; n_bins + 4];
-    izip!(hist_bin, magnitudes, grad_weights).for_each(|(bin, mag, weight)| {
+    izip!(hist_bin, magnitudes, grad_weights.iter()).for_each(|(bin, mag, weight)| {
         raw_hist[bin + 2] += weight * mag;
     });
     raw_hist[1] = raw_hist[n_bins + 1];

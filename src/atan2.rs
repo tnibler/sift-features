@@ -1,4 +1,4 @@
-/// Fast atan2 approximations.
+//! Fast atan2 approximations.
 // Taken from: https://mazzo.li/posts/vectorized-atan2.html
 // The original license header is reproduced below.
 //
