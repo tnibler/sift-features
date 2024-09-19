@@ -2,7 +2,11 @@ use aligned_vec::{avec, AVec, ConstAlign};
 use itertools::{izip, Itertools};
 use ndarray::{s, Array3, ArrayView2, ArrayViewMut3};
 
-use crate::{atan2, DESCRIPTOR_N_BINS, DESCRIPTOR_N_HISTOGRAMS, DESCRIPTOR_SIZE, LAMBDA_DESCR};
+use crate::{
+    atan2,
+    exp::{self, exp},
+    DESCRIPTOR_N_BINS, DESCRIPTOR_N_HISTOGRAMS, DESCRIPTOR_SIZE, LAMBDA_DESCR,
+};
 
 const BIN_ANGLE_STEP: f32 = DESCRIPTOR_N_BINS as f32 / 360.0;
 
@@ -19,8 +23,8 @@ pub fn compute_descriptor(
     let n_bins = DESCRIPTOR_N_BINS;
     let height = img.shape()[0];
     let width = img.shape()[1];
-    let x = x.round() as usize;
-    let y = y.round() as usize;
+    let x = x.round() as i32;
+    let y = y.round() as i32;
     let hist_width = LAMBDA_DESCR * scale;
     let radius = (LAMBDA_DESCR * scale * 2_f32.sqrt() * (n_hist + 1) as f32 * 0.5).round() as i32;
     let (sin_ori, cos_ori) = orientation.to_radians().sin_cos();
@@ -33,22 +37,32 @@ pub fn compute_descriptor(
     let mut row_bins: AVec<f32, ConstAlign<ALIGN>> = AVec::with_capacity(ALIGN, cap);
     let mut col_bins: AVec<f32, ConstAlign<ALIGN>> = AVec::with_capacity(ALIGN, cap);
     let mut weights: AVec<f32, ConstAlign<ALIGN>> = AVec::with_capacity(ALIGN, cap);
+    let img_sl = img.as_slice().unwrap();
     (-radius..=radius)
         .flat_map(|y_in_window| {
             (-radius..=radius).filter_map(move |x_in_window| {
+                // coordinates to read pixels from. No resampling here
+                let abs_y = y + y_in_window;
+                let abs_x = x + x_in_window;
+
+                if abs_x <= 0
+                    || abs_y <= 0
+                    || abs_x as usize >= width - 1
+                    || abs_y as usize >= height - 1
+                {
+                    return None;
+                }
+
                 // row and col in the keypoint's coordinates wrt its reference orientation
                 let col_rotated: f32 =
                     x_in_window as f32 * cos_ori_scaled - y_in_window as f32 * sin_ori_scaled;
                 let row_rotated: f32 =
                     x_in_window as f32 * sin_ori_scaled + y_in_window as f32 * cos_ori_scaled;
+
                 // Bin here means which of the 4*4 histograms the gradient at this point will
                 // contribute to. It is not a bin within a histogram.
                 let row_bin = row_rotated + (n_hist / 2) as f32;
                 let col_bin = col_rotated + (n_hist / 2) as f32;
-
-                // coordinates to read pixels from. No resampling here
-                let abs_y = y as i32 + y_in_window;
-                let abs_x = x as i32 + x_in_window;
 
                 // +/- 0.5 to check if the sample would contribute anything to the 4*4 histograms
                 // of interest with interpolation.
@@ -56,15 +70,25 @@ pub fn compute_descriptor(
                     && row_bin < n_hist as f32 + 0.5
                     && col_bin > -0.5
                     && col_bin < n_hist as f32 + 0.5
-                    && abs_y > 0
-                    && abs_y < (height - 1) as i32
-                    && abs_x > 0
-                    && abs_x < (width - 1) as i32
                 {
                     let abs_y = abs_y as usize;
                     let abs_x = abs_x as usize;
-                    let dx = img[(abs_y, abs_x + 1)] - img[(abs_y, abs_x - 1)];
-                    let dy = img[(abs_y - 1, abs_x)] - img[(abs_y + 1, abs_x)];
+                    // I've measured, the bounds checks and below are expensive and make up 5-11% of
+                    // program runtime, and asserts are too expensive in release mode as well
+                    // and don't help eliminating bounds checks.
+                    // Using a flat slice with manual index computation instead of ndarray index is also a bit faster.
+                    debug_assert!(abs_y > 0);
+                    debug_assert!(abs_y < img.shape()[0] - 1);
+                    debug_assert!(abs_x > 0);
+                    debug_assert!(abs_x < img.shape()[1] - 1);
+                    let dx = unsafe {
+                        img_sl.get_unchecked(abs_y * width + abs_x + 1)
+                            - img_sl.get_unchecked(abs_y * width + abs_x - 1)
+                    };
+                    let dy = unsafe {
+                        img_sl.get_unchecked((abs_y - 1) * width + abs_x)
+                            - img_sl.get_unchecked((abs_y + 1) * width + abs_x)
+                    };
 
                     if dx == 0. && dy == 0. {
                         return None;
@@ -94,7 +118,8 @@ pub fn compute_descriptor(
     // Different weighting than in [4]
     let weight_scale = -2. / (n_hist.pow(2) as f32);
     let weights: AVec<_, ConstAlign<ALIGN>> =
-        AVec::from_iter(ALIGN, weights.iter().map(|x| (x * weight_scale).exp()));
+        AVec::from_iter(ALIGN, weights.iter().map(|x| (x * weight_scale)));
+    let weights = exp::exp(&weights);
     // Gradient orientations in patch normalized wrt to the keypoint's reference orientation.
     //let normalized_orienations: AVec<_, ConstAlign<ALIGN>> = AVec::from_iter(
     //    ALIGN,
