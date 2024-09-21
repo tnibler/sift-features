@@ -119,28 +119,8 @@ pub fn compute_descriptor(
     let weight_scale = -2. / (n_hist.pow(2) as f32);
     let weights: AVec<_, ConstAlign<ALIGN>> =
         AVec::from_iter(ALIGN, weights.iter().map(|x| (x * weight_scale)));
-    let weights = exp::exp(&weights);
-    // Gradient orientations in patch normalized wrt to the keypoint's reference orientation.
-    //let normalized_orienations: AVec<_, ConstAlign<ALIGN>> = AVec::from_iter(
-    //    ALIGN,
-    //    gradients_x
-    //        .into_iter()
-    //        .zip(gradients_y.iter())
-    //        .map(|(x, y)| {
-    //            let x: f64 = *x as f64;
-    //            let y: f64 = *y as f64;
-    //            ((y.atan2(x).to_degrees() + 360.0) % 360.0) as f32 - orientation
-    //        }),
-    //);
-    let atans = atan2::atan2(&gradients_x, &gradients_y);
-    let normalized_orienations: AVec<_, ConstAlign<ALIGN>> = AVec::from_iter(
-        ALIGN,
-        atans.into_iter().map(|angle| {
-            let deg = angle.to_degrees();
-            let deg = if deg < 0. { deg + 360. } else { deg };
-            deg - orientation
-        }),
-    );
+    let weights = exp::exp(weights);
+
     // Gradient magnitudes
     let magnitude: AVec<_, ConstAlign<ALIGN>> = AVec::from_iter(
         ALIGN,
@@ -148,6 +128,17 @@ pub fn compute_descriptor(
             .iter()
             .zip(gradients_y.iter())
             .map(|(x, y)| (x * x + y * y).sqrt()),
+    );
+
+    // Gradient orientations in patch normalized wrt to the keypoint's reference orientation.
+    let atans = atan2::atan2(gradients_x, &gradients_y);
+    let normalized_orienations: AVec<_, ConstAlign<ALIGN>> = AVec::from_iter(
+        ALIGN,
+        atans.iter().map(|angle| {
+            let deg = angle.to_degrees();
+            let deg = if deg < 0. { deg + 360. } else { deg };
+            deg - orientation
+        }),
     );
 
     // Instead of 4*4 histograms, we work with 5*5 here so that the interpolation works out simpler

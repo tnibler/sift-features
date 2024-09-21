@@ -34,26 +34,22 @@ use aligned_vec::{avec, AVec, ConstAlign};
 /// # Panics
 ///
 /// If start of `xs` is not aligned to 32-bytes
-pub fn exp(xs_aligned: &[f32]) -> AVec<f32, ConstAlign<32>> {
+pub fn exp(mut xs_aligned: AVec<f32, ConstAlign<32>>) -> AVec<f32, ConstAlign<32>> {
     const ALIGN: usize = 32;
     assert_eq!(xs_aligned.as_ptr() as usize % ALIGN, 0);
-    let mut result: AVec<f32, ConstAlign<32>> = avec!([32]| 0.; xs_aligned.len());
     let tail = if is_x86_feature_detected!("avx2") {
         let tail = xs_aligned.len() - (xs_aligned.len() % 8);
         unsafe {
-            exp_avx2(&xs_aligned[..tail], &mut result);
+            exp_avx2(&mut xs_aligned[..tail]);
         }
         tail
     } else {
         0
     };
     xs_aligned[tail..]
-        .iter()
-        .copied()
-        .map(exp_single)
-        .enumerate()
-        .for_each(|(i, el)| result[tail + i] = el);
-    result
+        .iter_mut()
+        .for_each(|v| *v = exp_single(*v));
+    xs_aligned
 }
 
 const EXP_HI: f32 = 88.37626;
@@ -78,7 +74,7 @@ fn exp_single(x: f32) -> f32 {
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn exp_avx2(xs: &[f32], out: &mut [f32]) {
+unsafe fn exp_avx2(xs: &mut [f32]) {
     use std::arch::x86_64::*;
     let log2e = _mm256_set1_ps(f32::consts::LOG2_E);
     let ln2 = _mm256_set1_ps(f32::consts::LN_2);
@@ -93,7 +89,8 @@ unsafe fn exp_avx2(xs: &[f32], out: &mut [f32]) {
     let p5 = _mm256_set1_ps(P5);
 
     for i in (0..xs.len()).step_by(8) {
-        let x = _mm256_load_ps(xs.as_ptr().add(i));
+        let ptr = xs.as_mut_ptr().add(i);
+        let x = _mm256_load_ps(ptr);
         let x = _mm256_min_ps(x, exp_hi);
         let x = _mm256_max_ps(x, exp_lo);
 
@@ -117,7 +114,7 @@ unsafe fn exp_avx2(xs: &[f32], out: &mut [f32]) {
         let imm0 = _mm256_slli_epi32(imm0, 23);
         let pow2n = _mm256_castsi256_ps(imm0);
         let y = _mm256_mul_ps(y, pow2n);
-        _mm256_store_ps(out.as_mut_ptr().add(i), y);
+        _mm256_store_ps(ptr, y);
     }
 }
 
@@ -125,7 +122,7 @@ unsafe fn exp_avx2(xs: &[f32], out: &mut [f32]) {
 fn fast_exp_accurate() {
     let values: AVec<f32, ConstAlign<32>> =
         AVec::from_iter(32, (0..1024).map(|i| (i as f32 * 0.21) - 50.));
-    let exps = exp(&values);
+    let exps = exp(values.clone());
     println!("{exps:?}");
     for (v, e) in values.iter().zip(exps.iter()) {
         let expected = v.exp();

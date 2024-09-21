@@ -33,29 +33,26 @@ const A11: f32 = -0.0117212;
 /// - if start of `xs` and `ys` is not aligned to 32-bytes
 /// - if `xs` and `ys` are not the same length
 /// - if the input includes the point (0., 0.).
-pub fn atan2(xs_aligned: &[f32], ys_aligned: &[f32]) -> AVec<f32, ConstAlign<32>> {
-    const ALIGN: usize = 32;
+pub fn atan2(
+    mut xs_aligned: AVec<f32, ConstAlign<32>>,
+    ys_aligned: &[f32],
+) -> AVec<f32, ConstAlign<32>> {
     assert_eq!(xs_aligned.len(), ys_aligned.len());
-    assert_eq!(xs_aligned.as_ptr() as usize % ALIGN, 0);
-    assert_eq!(ys_aligned.as_ptr() as usize % ALIGN, 0);
-    let mut result: AVec<f32, ConstAlign<32>> = avec!([32]| 0.; xs_aligned.len());
+    assert_eq!(ys_aligned.as_ptr() as usize % 32, 0);
     let tail = if is_x86_feature_detected!("avx2") {
         let tail = xs_aligned.len() - (xs_aligned.len() % 8);
         unsafe {
-            atan2_avx2(&xs_aligned[..tail], &ys_aligned[..tail], &mut result);
+            atan2_avx2(&mut xs_aligned[..tail], &ys_aligned[..tail]);
         }
         tail
     } else {
         0
     };
     xs_aligned[tail..]
-        .iter()
-        .copied()
+        .iter_mut()
         .zip(ys_aligned[tail..].iter().copied())
-        .map(|(x, y)| atan2_single(x, y))
-        .enumerate()
-        .for_each(|(i, el)| result[tail + i] = el);
-    result
+        .for_each(|(x, y)| *x = atan2_single(*x, y));
+    xs_aligned
 }
 
 fn atan2_single(x: f32, y: f32) -> f32 {
@@ -77,7 +74,7 @@ fn atan2_single(x: f32, y: f32) -> f32 {
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn atan2_avx2(xs: &[f32], ys: &[f32], out: &mut [f32]) {
+unsafe fn atan2_avx2(xs_out: &mut [f32], ys: &[f32]) {
     use std::arch::x86_64::*;
     let pi = _mm256_set1_ps(f32::consts::PI);
     let pi_2 = _mm256_set1_ps(f32::consts::FRAC_PI_2);
@@ -91,9 +88,9 @@ unsafe fn atan2_avx2(xs: &[f32], ys: &[f32], out: &mut [f32]) {
     let a7 = _mm256_set1_ps(A7);
     let a9 = _mm256_set1_ps(A9);
     let a11 = _mm256_set1_ps(A11);
-    for i in (0..xs.len()).step_by(8) {
+    for i in (0..xs_out.len()).step_by(8) {
         let y = _mm256_load_ps(&ys[i]);
-        let x = _mm256_load_ps(&xs[i]);
+        let x = _mm256_load_ps(&xs_out[i]);
         let abs_y = _mm256_and_ps(abs_mask, y);
         let abs_x = _mm256_and_ps(abs_mask, x);
         let a = _mm256_div_ps(_mm256_min_ps(abs_x, abs_y), _mm256_max_ps(abs_x, abs_y));
@@ -120,6 +117,6 @@ unsafe fn atan2_avx2(xs: &[f32], ys: &[f32], out: &mut [f32]) {
             _mm256_and_ps(pi, x_sign_mask),
         );
         let result = _mm256_xor_ps(result, _mm256_and_ps(y, sign_mask));
-        _mm256_store_ps(out.as_mut_ptr().add(i), result);
+        _mm256_store_ps(xs_out.as_mut_ptr().add(i), result);
     }
 }

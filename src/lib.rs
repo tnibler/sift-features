@@ -23,7 +23,7 @@
 use std::cmp::min;
 use std::f32::consts::PI as PI32;
 
-use aligned_vec::{AVec, ConstAlign};
+use aligned_vec::{avec, AVec, ConstAlign};
 use image::buffer::ConvertBuffer;
 use image::imageops::{resize, FilterType};
 use image::{GrayImage, ImageBuffer, Luma};
@@ -349,41 +349,42 @@ fn find_extrema_in_dog_img<'a>(
     }
 
     let extremum_threshold: f32 = (0.5 * CONTRAST_THRESHOLD / SCALES_PER_OCTAVE as f32).floor();
-    let extrema = local_extrema(
+    let kps = local_extrema(
         &dogslice,
         IMAGE_BORDER as usize,
         extremum_threshold,
-        discard_or_interpolate_extremum,
-        (&dog.view(), scale_space, octave, scale_in_octave),
-    );
-
-    Box::new(extrema.into_iter())
+        scale_in_octave,
+        &dog.view(),
+    )
+    .into_iter()
+    .flat_map(move |extr| keypoints_from_extremum(extr, octave, scale_space));
+    Box::new(kps)
 }
 
-fn discard_or_interpolate_extremum(
-    x_initial: usize,
-    y_initial: usize,
-    (dog, scale_space, octave, scale_in_octave): (&ArrayView3<f32>, &[Array3<f32>], usize, usize),
-    out_keypoints: &mut Vec<SiftKeyPoint>,
-) {
-    let dogslice = dog.slice(s![scale_in_octave - 1..scale_in_octave + 2, .., ..]);
+#[derive(Debug, Clone, Copy)]
+struct RetainedExtremum {
+    point: ScaleSpacePoint,
+    offset_scale: f32,
+    offset_x: f32,
+    offset_y: f32,
+    contrast: f32,
+}
+
+#[inline(always)]
+/// `point_initial`: local extremum in dogslice to inerpolate
+/// `dogslice`: View into `dog` of shape (3, h, w) where the center plane == `point_initial.scale`
+pub(crate) fn discard_or_interpolate_extremum(
+    point_initial: ScaleSpacePoint,
+    dogslice: &ArrayView3<f32>,
+    dog: &ArrayView3<f32>,
+) -> Option<RetainedExtremum> {
     assert!(dogslice.shape()[0] == 3);
     let InterpolateResult {
         offset_scale,
         offset_x,
         offset_y,
         point,
-    } = match interpolate_extremum(
-        dog.into(),
-        ScaleSpacePoint {
-            scale: scale_in_octave,
-            x: x_initial,
-            y: y_initial,
-        },
-    ) {
-        Some(r) => r,
-        None => return,
-    };
+    } = interpolate_extremum(dog.into(), point_initial)?;
 
     let dogslice = dog.slice(s![(point.scale - 1)..(point.scale + 2), .., ..]);
     let curr = dogslice.index_axis(Axis(0), 1);
@@ -392,14 +393,33 @@ fn discard_or_interpolate_extremum(
         extremum_contrast(dogslice, point.x, point.y, offset_scale, offset_x, offset_y).abs();
 
     if contrast * SCALES_PER_OCTAVE as f32 <= CONTRAST_THRESHOLD {
-        return;
+        return None;
     }
 
     // Discard extrema located on edges
     if extremum_is_on_edge(curr, point) {
-        return;
+        return None;
     }
+    Some(RetainedExtremum {
+        point,
+        offset_scale,
+        offset_x,
+        offset_y,
+        contrast,
+    })
+}
 
+fn keypoints_from_extremum(
+    RetainedExtremum {
+        point,
+        offset_scale,
+        offset_x,
+        offset_y,
+        contrast,
+    }: RetainedExtremum,
+    octave: usize,
+    scale_space: &[Array3<f32>],
+) -> impl Iterator<Item = SiftKeyPoint> {
     let octave_scale_factor = 2_f32.powi(octave as i32);
 
     // Called sigma in [4]
@@ -428,7 +448,7 @@ fn discard_or_interpolate_extremum(
     let localmax_threshold = histogram_max * ORIENTATION_HISTOGRAM_LOCALMAX_RATIO;
 
     // Extract keypoint reference orientations, Section 4.1.C in [4]
-    let kps_with_ref_orientation = (0..hist.len()).filter_map(move |k| {
+    (0..hist.len()).filter_map(move |k| {
         // h_k- and h_k+ in [4].
         // Histogram indices wrap around since bins correspond to angles.
         let k_minus = if k > 0 { k - 1 } else { hist.len() - 1 };
@@ -462,8 +482,7 @@ fn discard_or_interpolate_extremum(
         } else {
             None
         }
-    });
-    out_keypoints.extend(kps_with_ref_orientation);
+    })
 }
 
 #[derive(Copy, Clone)]
@@ -585,17 +604,19 @@ fn extremum_contrast(
     interp_offset_y: f32,
 ) -> f32 {
     assert!(dogslice.shape()[0] == 3);
-    let prev = dogslice.index_axis(Axis(0), 0);
-    let curr = dogslice.index_axis(Axis(0), 1);
-    let next = dogslice.index_axis(Axis(0), 2);
-    // 3D Gradient
-    let g1 = (next[(y, x)] - prev[(y, x)]) / 2.;
-    let g2 = (curr[(y + 1, x)] - curr[(y - 1, x)]) / 2.;
-    let g3 = (curr[(y, x + 1)] - curr[(y, x - 1)]) / 2.;
-    // Value of the interpolating function at x̂ in [2], or α* in [4].
-    let interp = interp_offset_scale * g1 + interp_offset_y * g2 + interp_offset_x * g3;
-    curr[(y, x)] + interp / 2.
-    // extremum_contrast.abs() * SCALES_PER_OCTAVE as f32 > CONTRAST_THRESHOLD
+    unsafe {
+        let prev = dogslice.index_axis(Axis(0), 0);
+        let curr = dogslice.index_axis(Axis(0), 1);
+        let next = dogslice.index_axis(Axis(0), 2);
+        // 3D Gradient
+        let g1 = (next.uget((y, x)) - prev.uget((y, x))) / 2.;
+        let g2 = (curr.uget((y + 1, x)) - curr.uget((y - 1, x))) / 2.;
+        let g3 = (curr.uget((y, x + 1)) - curr.uget((y, x - 1))) / 2.;
+        // Value of the interpolating function at x̂ in .uget(2), or α* in .uget(4).
+        let interp = interp_offset_scale * g1 + interp_offset_y * g2 + interp_offset_x * g3;
+        curr.uget((y, x)) + interp / 2.
+        // extremum_contrast.abs() * SCALES_PER_OCTAVE as f32 > CONTRAST_THRESHOLD
+    }
 }
 
 /// Measures "edgeness" of a point the ratio between eigenvalues of the Hessian matrix.
@@ -606,23 +627,27 @@ fn extremum_is_on_edge(
 ) -> bool {
     assert!(x > 0 && x < dog_curr.shape()[1] - 1);
     assert!(y > 0 && y < dog_curr.shape()[0] - 1);
-    let val2x = dog_curr[(y, x)] * 2.0;
-    let h11 = dog_curr[(y + 1, x)] + dog_curr[(y - 1, x)] - val2x;
-    let d22 = dog_curr[(y, x + 1)] + dog_curr[(y, x - 1)] - val2x;
+    unsafe {
+        let val2x = dog_curr.uget((y, x)) * 2.0;
+        let h11 = dog_curr.uget((y + 1, x)) + dog_curr.uget((y - 1, x)) - val2x;
+        let d22 = dog_curr.uget((y, x + 1)) + dog_curr.uget((y, x - 1)) - val2x;
 
-    let h12 = (dog_curr[(y + 1, x + 1)] - dog_curr[(y + 1, x - 1)] - dog_curr[(y - 1, x + 1)]
-        + dog_curr[(y - 1, x - 1)])
-        / 4.;
+        let h12 = (dog_curr.uget((y + 1, x + 1))
+            - dog_curr.uget((y + 1, x - 1))
+            - dog_curr.uget((y - 1, x + 1))
+            + dog_curr.uget((y - 1, x - 1)))
+            / 4.;
 
-    let tr = d22 + h11;
-    let det = d22 * h11 - h12 * h12;
-    if det <= 0. {
-        return true;
+        let tr = d22 + h11;
+        let det = d22 * h11 - h12 * h12;
+        if det <= 0. {
+            return true;
+        }
+        // edgeness = tr^2 / det
+        //     edgeness > (C_edge + 1)^2 / C_edge
+        // <=> tr^2 * C_edge > (C_edge + 1)^2 * det
+        (tr * tr * EDGE_THRESHOLD) > (EDGE_THRESHOLD + 1.0).powi(2) * det
     }
-    // edgeness = tr^2 / det
-    //     edgeness > (C_edge + 1)^2 / C_edge
-    // <=> tr^2 * C_edge > (C_edge + 1)^2 * det
-    (tr * tr * EDGE_THRESHOLD) > (EDGE_THRESHOLD + 1.0).powi(2) * det
 }
 
 /// Histogram of gradient directions in square patch of side length 2*radius around (row, col).
@@ -644,68 +669,68 @@ fn gradient_direction_histogram(
 
     // x/y gradients are weighted by their distance from the point at (row, col).
     // grad_weights holds the exponent of the weighting factor in Eq. (20) in [4]
-    let (grads_x, grads_y, grad_weights): (AlignVec, AlignVec, AlignVec) = {
-        let mut grads_x: AVec<f32, _> = AVec::with_capacity(ALIGN, (4 * radius * radius) as usize);
-        let mut grads_y: AVec<f32, _> = AVec::with_capacity(ALIGN, (4 * radius * radius) as usize);
-        let mut grad_weights: AVec<f32, _> =
-            AVec::with_capacity(ALIGN, (4 * radius * radius) as usize);
-        (-radius..=radius)
-            .filter_map(|y_patch| {
-                if y_patch <= -(y as i32) {
-                    return None;
-                }
-                let y: i64 = i64::from(y) + i64::from(y_patch);
-                if y <= 0 || y as usize >= img.shape()[0] - 1 {
-                    return None;
-                }
-                Some((y as usize, y_patch))
-            })
-            .flat_map(|(y_img, y_patch)| {
-                (-radius..=radius)
-                    .filter_map(|x_patch| {
-                        if x_patch <= -(x as i32) {
-                            return None;
-                        }
-                        let x = x as isize + x_patch as isize;
-                        if x <= 0 || x as usize >= img.shape()[1] - 1 {
-                            return None;
-                        }
-                        Some((x as usize, x_patch))
-                    })
-                    .filter_map(move |(x_img, x_patch)| {
-                        let dx = img[(y_img, x_img + 1)] - img[(y_img, x_img - 1)];
-                        let dy = img[(y_img - 1, x_img)] - img[(y_img + 1, x_img)];
-                        // The point (0, 0) is not handled by atan2
-                        if dx == 0. && dy == 0. {
-                            return None;
-                        }
-                        // squared euclidian distance from (row, col) * weighting factor
-                        let w = (y_patch * y_patch + x_patch * x_patch) as f32 * grad_weight_scale;
-                        Some((dx, dy, w))
-                    })
-            })
-            .for_each(|(dx, dy, w)| {
-                grads_x.push(dx);
-                grads_y.push(dy);
-                grad_weights.push(w);
-            });
-        (grads_x, grads_y, grad_weights)
-    };
+
+    let mut grads_x: AVec<f32, _> = avec!([ALIGN]| 0.; ((2 * radius + 1).pow(2)) as usize);
+    let mut grads_y: AVec<f32, _> = avec!([ALIGN]| 0.; ((2 * radius + 1).pow(2)) as usize);
+    let mut grad_weights: AVec<f32, _> = avec!([ALIGN]| 0.; ((2 * radius + 1).pow(2)) as usize);
+    let mut len: usize = 0;
+    for y_patch in -radius..(radius + 1) {
+        if y_patch <= -(y as i32) {
+            continue;
+        }
+        let y_img: i64 = i64::from(y) + i64::from(y_patch);
+        if y_img <= 0 || y_img as usize >= img.shape()[0] - 1 {
+            continue;
+        }
+        let y_img = y_img as usize;
+        for x_patch in -radius..(radius + 1) {
+            if x_patch <= -(x as i32) {
+                continue;
+            }
+            let x_img = x as isize + x_patch as isize;
+            if x_img <= 0 || x_img as usize >= img.shape()[1] - 1 {
+                continue;
+            }
+            let x_img = x_img as usize;
+            let dx = img[(y_img, x_img + 1)] - img[(y_img, x_img - 1)];
+            let dy = img[(y_img - 1, x_img)] - img[(y_img + 1, x_img)];
+            // The point (0, 0) is not handled by atan2
+            if dx == 0. && dy == 0. {
+                continue;
+            }
+            // squared euclidian distance from (row, col) * weighting factor
+            let w = (y_patch * y_patch + x_patch * x_patch) as f32 * grad_weight_scale;
+            grads_x[len] = dx;
+            grads_y[len] = dy;
+            grad_weights[len] = w;
+            len += 1;
+        }
+    }
+    grads_x.truncate(len);
+    grads_y.truncate(len);
+    grad_weights.truncate(len);
+    let grads_x = grads_x;
+    let grads_y = grads_y;
+    let grad_weights = grad_weights;
 
     // Finalizing the term in Eq. (20) in [4]
-    let grad_weights = exp::exp(&grad_weights);
+    let grad_weights = exp::exp(grad_weights);
     // gradient magnitudes
-    let magnitudes = grads_x
-        .iter()
-        .zip(grads_y.iter())
-        .map(|(x, y)| (x * x + y * y).sqrt());
+    let magnitudes: AVec<f32, ConstAlign<32>> = AVec::from_iter(
+        32,
+        grads_x
+            .iter()
+            .zip(grads_y.iter())
+            .map(|(x, y)| (x * x + y * y).sqrt()),
+    );
 
-    let orientations = atan2::atan2(&grads_x, &grads_y);
+    let orientations = atan2::atan2(grads_x, &grads_y);
 
     // Range of angles (radians) assigned to one histogram bin
     let bin_angle_step = n_bins as f32 / (PI32 * 2.);
     // Histogram bin index as given by Eq. (21) in [4]
     let hist_bin = orientations.into_iter().map(|ori| {
+        // TODO: this is slow, vectorize
         assert!((-PI32..=PI32).contains(&ori));
         let raw_bin = bin_angle_step * ori;
         // raw_bin is in range [-PI * (n_bins / 2PI); PI * (n_bins / 2PI)]
@@ -728,7 +753,7 @@ fn gradient_direction_histogram(
     // raw_hist has length n_bins + 4 because the convolution is circular/cyclic and  wraps around,
     // so we copy the first and last 2 values to the other end of the histogram to get this wrapping.
     let mut raw_hist = vec![0.0; n_bins + 4];
-    izip!(hist_bin, magnitudes, grad_weights.iter()).for_each(|(bin, mag, weight)| {
+    izip!(hist_bin, magnitudes.iter(), grad_weights.iter()).for_each(|(bin, mag, weight)| {
         raw_hist[bin + 2] += weight * mag;
     });
     raw_hist[1] = raw_hist[n_bins + 1];

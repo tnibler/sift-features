@@ -1,139 +1,133 @@
-use ndarray::ArrayView3;
+use ndarray::{Array3, ArrayView3};
 
-pub fn local_extrema<T, CallerData: Copy>(
-    arr: &ArrayView3<f32>,
+use crate::{discard_or_interpolate_extremum, RetainedExtremum, ScaleSpacePoint, SiftKeyPoint};
+
+pub fn local_extrema(
+    dogslice: &ArrayView3<f32>,
     border: usize,
     value_threshold: f32,
-    discard_or_process: impl Fn(usize, usize, CallerData, &mut Vec<T>),
-    caller_data: CallerData,
-) -> Vec<T> {
+    scale: usize,
+    dog: &ArrayView3<f32>,
+) -> Vec<RetainedExtremum> {
     assert!(border >= 1);
-    assert!(2 * border <= arr.shape()[1]);
-    assert!(2 * border <= arr.shape()[2]);
-    let nz = arr.shape()[0];
+    assert!(2 * border <= dogslice.shape()[1]);
+    assert!(2 * border <= dogslice.shape()[2]);
+    let nz = dogslice.shape()[0];
     assert!(nz == 3);
     #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") {
-            return unsafe {
-                local_extrema_avx2(
-                    arr,
-                    border,
-                    value_threshold,
-                    discard_or_process,
-                    caller_data,
-                )
-            };
-        }
+        //if std::arch::is_x86_feature_detected!("avx2") {
+        return unsafe { local_extrema_avx2(dogslice, border, value_threshold, scale, dog) };
+        //}
     }
-    local_extrema_fallback(
-        arr,
-        border,
-        value_threshold,
-        discard_or_process,
-        caller_data,
-    )
+    //local_extrema_fallback(
+    //    arr,
+    //    border,
+    //    value_threshold,
+    //    discard_or_process,
+    //    caller_data,
+    //)
 }
 
-pub fn local_extrema_fallback<T, CallerData: Copy>(
-    arr: &ArrayView3<f32>,
-    border: usize,
-    threshold: f32,
-    discard_or_process: impl Fn(usize, usize, CallerData, &mut Vec<T>),
-    caller_data: CallerData,
-) -> Vec<T> {
-    assert!(border >= 1);
-    assert!(2 * border <= arr.shape()[1]);
-    assert!(2 * border <= arr.shape()[2]);
-
-    let nz = arr.shape()[0];
-    assert!(nz == 3);
-    let ny = arr.shape()[1];
-    let nx = arr.shape()[2];
-
-    // Little bit of a dance to eliminate bounds checks and generate nice code
-    let sl = arr.as_slice().expect("should be contiguous");
-    let (p0, sl) = sl.split_at(nx * ny);
-    let (p1, p2) = sl.split_at(nx * ny);
-    let mut extrema = Vec::default();
-
-    for y in border..(ny - border) {
-        for x in border..(nx - border) {
-            let val = p1[(y) * nx + x];
-            if val.abs() <= threshold {
-                continue;
-            }
-            let c = if val >= 0. {
-                val >= p1[(y) * nx + x - 1]
-                    && val >= p1[(y) * nx + x + 1]
-                    && val >= p1[(y + 1) * nx + x + 1]
-                    && val >= p1[(y + 1) * nx + x]
-                    && val >= p1[(y + 1) * nx + x - 1]
-                    && val >= p1[(y - 1) * nx + x + 1]
-                    && val >= p1[(y - 1) * nx + x]
-                    && val >= p1[(y - 1) * nx + x - 1]
-                    && val >= p0[(y) * nx + x - 1]
-                    && val >= p0[(y) * nx + x]
-                    && val >= p0[(y) * nx + x + 1]
-                    && val >= p0[(y + 1) * nx + x + 1]
-                    && val >= p0[(y + 1) * nx + x]
-                    && val >= p0[(y + 1) * nx + x - 1]
-                    && val >= p0[(y - 1) * nx + x + 1]
-                    && val >= p0[(y - 1) * nx + x]
-                    && val >= p0[(y - 1) * nx + x - 1]
-                    && val >= p2[(y) * nx + x - 1]
-                    && val >= p2[(y) * nx + x]
-                    && val >= p2[(y) * nx + x + 1]
-                    && val >= p2[(y + 1) * nx + x + 1]
-                    && val >= p2[(y + 1) * nx + x]
-                    && val >= p2[(y + 1) * nx + x - 1]
-                    && val >= p2[(y - 1) * nx + x + 1]
-                    && val >= p2[(y - 1) * nx + x]
-                    && val >= p2[(y - 1) * nx + x - 1]
-            } else {
-                val <= p1[(y) * nx + x - 1]
-                    && val <= p1[(y) * nx + x + 1]
-                    && val <= p1[(y + 1) * nx + x + 1]
-                    && val <= p1[(y + 1) * nx + x]
-                    && val <= p1[(y + 1) * nx + x - 1]
-                    && val <= p1[(y - 1) * nx + x + 1]
-                    && val <= p1[(y - 1) * nx + x]
-                    && val <= p1[(y - 1) * nx + x - 1]
-                    && val <= p0[(y) * nx + x - 1]
-                    && val <= p0[(y) * nx + x]
-                    && val <= p0[(y) * nx + x + 1]
-                    && val <= p0[(y + 1) * nx + x + 1]
-                    && val <= p0[(y + 1) * nx + x]
-                    && val <= p0[(y + 1) * nx + x - 1]
-                    && val <= p0[(y - 1) * nx + x + 1]
-                    && val <= p0[(y - 1) * nx + x]
-                    && val <= p0[(y - 1) * nx + x - 1]
-                    && val <= p2[(y) * nx + x - 1]
-                    && val <= p2[(y) * nx + x]
-                    && val <= p2[(y) * nx + x + 1]
-                    && val <= p2[(y + 1) * nx + x + 1]
-                    && val <= p2[(y + 1) * nx + x]
-                    && val <= p2[(y + 1) * nx + x - 1]
-                    && val <= p2[(y - 1) * nx + x + 1]
-                    && val <= p2[(y - 1) * nx + x]
-                    && val <= p2[(y - 1) * nx + x - 1]
-            };
-            if c {
-                discard_or_process(x, y, caller_data, &mut extrema);
-            }
-        }
-    }
-    extrema
-}
-
+//pub fn local_extrema_fallback<T, CallerData: Copy>(
+//    arr: &ArrayView3<f32>,
+//    border: usize,
+//    threshold: f32,
+//    discard_or_process: impl Fn(usize, usize, CallerData, &mut Vec<T>),
+//    caller_data: (&ArrayView3<f32>, &[Array3<f32>], usize, usize),
+//) -> Vec<T> {
+//    assert!(border >= 1);
+//    assert!(2 * border <= arr.shape()[1]);
+//    assert!(2 * border <= arr.shape()[2]);
+//
+//    let nz = arr.shape()[0];
+//    assert!(nz == 3);
+//    let ny = arr.shape()[1];
+//    let nx = arr.shape()[2];
+//
+//    // Little bit of a dance to eliminate bounds checks and generate nice code
+//    let sl = arr.as_slice().expect("should be contiguous");
+//    let (p0, sl) = sl.split_at(nx * ny);
+//    let (p1, p2) = sl.split_at(nx * ny);
+//    let mut extrema = Vec::default();
+//
+//    for y in border..(ny - border) {
+//        for x in border..(nx - border) {
+//            let val = p1[(y) * nx + x];
+//            if val.abs() <= threshold {
+//                continue;
+//            }
+//            let c = if val >= 0. {
+//                val >= p1[(y) * nx + x - 1]
+//                    && val >= p1[(y) * nx + x + 1]
+//                    && val >= p1[(y + 1) * nx + x + 1]
+//                    && val >= p1[(y + 1) * nx + x]
+//                    && val >= p1[(y + 1) * nx + x - 1]
+//                    && val >= p1[(y - 1) * nx + x + 1]
+//                    && val >= p1[(y - 1) * nx + x]
+//                    && val >= p1[(y - 1) * nx + x - 1]
+//                    && val >= p0[(y) * nx + x - 1]
+//                    && val >= p0[(y) * nx + x]
+//                    && val >= p0[(y) * nx + x + 1]
+//                    && val >= p0[(y + 1) * nx + x + 1]
+//                    && val >= p0[(y + 1) * nx + x]
+//                    && val >= p0[(y + 1) * nx + x - 1]
+//                    && val >= p0[(y - 1) * nx + x + 1]
+//                    && val >= p0[(y - 1) * nx + x]
+//                    && val >= p0[(y - 1) * nx + x - 1]
+//                    && val >= p2[(y) * nx + x - 1]
+//                    && val >= p2[(y) * nx + x]
+//                    && val >= p2[(y) * nx + x + 1]
+//                    && val >= p2[(y + 1) * nx + x + 1]
+//                    && val >= p2[(y + 1) * nx + x]
+//                    && val >= p2[(y + 1) * nx + x - 1]
+//                    && val >= p2[(y - 1) * nx + x + 1]
+//                    && val >= p2[(y - 1) * nx + x]
+//                    && val >= p2[(y - 1) * nx + x - 1]
+//            } else {
+//                val <= p1[(y) * nx + x - 1]
+//                    && val <= p1[(y) * nx + x + 1]
+//                    && val <= p1[(y + 1) * nx + x + 1]
+//                    && val <= p1[(y + 1) * nx + x]
+//                    && val <= p1[(y + 1) * nx + x - 1]
+//                    && val <= p1[(y - 1) * nx + x + 1]
+//                    && val <= p1[(y - 1) * nx + x]
+//                    && val <= p1[(y - 1) * nx + x - 1]
+//                    && val <= p0[(y) * nx + x - 1]
+//                    && val <= p0[(y) * nx + x]
+//                    && val <= p0[(y) * nx + x + 1]
+//                    && val <= p0[(y + 1) * nx + x + 1]
+//                    && val <= p0[(y + 1) * nx + x]
+//                    && val <= p0[(y + 1) * nx + x - 1]
+//                    && val <= p0[(y - 1) * nx + x + 1]
+//                    && val <= p0[(y - 1) * nx + x]
+//                    && val <= p0[(y - 1) * nx + x - 1]
+//                    && val <= p2[(y) * nx + x - 1]
+//                    && val <= p2[(y) * nx + x]
+//                    && val <= p2[(y) * nx + x + 1]
+//                    && val <= p2[(y + 1) * nx + x + 1]
+//                    && val <= p2[(y + 1) * nx + x]
+//                    && val <= p2[(y + 1) * nx + x - 1]
+//                    && val <= p2[(y - 1) * nx + x + 1]
+//                    && val <= p2[(y - 1) * nx + x]
+//                    && val <= p2[(y - 1) * nx + x - 1]
+//            };
+//            if c {
+//                discard_or_process(x, y, caller_data, &mut extrema);
+//            }
+//        }
+//    }
+//    extrema
+//}
+//
 #[target_feature(enable = "avx2")]
-unsafe fn local_extrema_avx2<T, CallerData: Copy>(
+unsafe fn local_extrema_avx2(
     arr: &ArrayView3<f32>,
     border: usize,
     value_threshold: f32,
-    discard_or_process: impl Fn(usize, usize, CallerData, &mut Vec<T>),
-    caller_data: CallerData,
-) -> Vec<T> {
+    scale: usize,
+    dog: &ArrayView3<f32>,
+) -> Vec<RetainedExtremum> {
     assert!(border >= 1);
     assert!(2 * border <= arr.shape()[1]);
     assert!(2 * border <= arr.shape()[2]);
@@ -151,7 +145,7 @@ unsafe fn local_extrema_avx2<T, CallerData: Copy>(
     let p2 = arr.as_slice().unwrap()[(2 * ny * nx)..(3 * ny * nx)].as_ptr();
     let ny = arr.shape()[1] as isize;
     let nx = arr.shape()[2] as isize;
-    let mut extrema: Vec<T> = Vec::default();
+    let mut extrema: Vec<RetainedExtremum> = Vec::default();
     let mut buf_idx: usize = 0;
     let mut buf_start: usize = (nx as usize * border) + border;
     let vvalue_threshold = _mm256_set1_ps(value_threshold);
@@ -160,7 +154,12 @@ unsafe fn local_extrema_avx2<T, CallerData: Copy>(
         for y in (border as isize)..(ny - border as isize) {
             let mut x = border as isize;
 
-            while x + 8 < nx - border as isize {
+            while x < nx - border as isize {
+                let dist_from_border = nx - border as isize - x;
+                if dist_from_border < 8 {
+                    x -= 8 - dist_from_border;
+                    buf_idx -= (8 - dist_from_border) as usize;
+                }
                 if (buf_idx + nx as usize) >= scratch.len() {
                     scratch
                         .iter()
@@ -170,7 +169,17 @@ unsafe fn local_extrema_avx2<T, CallerData: Copy>(
                             if *extr {
                                 let ey = (buf_start + idx) / (nx as usize);
                                 let ex = (buf_start + idx) % nx as usize; // TODO: replace modulo
-                                discard_or_process(ex, ey, caller_data, &mut extrema);
+                                if let Some(res) = discard_or_interpolate_extremum(
+                                    ScaleSpacePoint {
+                                        scale,
+                                        x: ex,
+                                        y: ey,
+                                    },
+                                    arr,
+                                    dog,
+                                ) {
+                                    extrema.push(res);
+                                }
                             }
                         });
                     buf_start = (y * nx + x) as usize;
@@ -269,71 +278,6 @@ unsafe fn local_extrema_avx2<T, CallerData: Copy>(
                 x += 8;
                 buf_idx += 8;
             }
-            let y = y as usize;
-            while x < nx - border as isize {
-                let xx = x as usize;
-                let val = arr.uget((1, y, xx));
-                let c = if val >= &0. {
-                    *val > value_threshold
-                        && val >= arr.uget((1, y, xx - 1))
-                        && val >= arr.uget((1, y, xx + 1))
-                        && val >= arr.uget((1, y + 1, xx + 1))
-                        && val >= arr.uget((1, y + 1, xx))
-                        && val >= arr.uget((1, y + 1, xx - 1))
-                        && val >= arr.uget((1, y - 1, xx + 1))
-                        && val >= arr.uget((1, y - 1, xx))
-                        && val >= arr.uget((1, y - 1, xx - 1))
-                        && val >= arr.uget((0, y, xx - 1))
-                        && val >= arr.uget((0, y, xx))
-                        && val >= arr.uget((0, y, xx + 1))
-                        && val >= arr.uget((0, y + 1, xx + 1))
-                        && val >= arr.uget((0, y + 1, xx))
-                        && val >= arr.uget((0, y + 1, xx - 1))
-                        && val >= arr.uget((0, y - 1, xx + 1))
-                        && val >= arr.uget((0, y - 1, xx))
-                        && val >= arr.uget((0, y - 1, xx - 1))
-                        && val >= arr.uget((2, y, xx - 1))
-                        && val >= arr.uget((2, y, xx))
-                        && val >= arr.uget((2, y, xx + 1))
-                        && val >= arr.uget((2, y + 1, xx + 1))
-                        && val >= arr.uget((2, y + 1, xx))
-                        && val >= arr.uget((2, y + 1, xx - 1))
-                        && val >= arr.uget((2, y - 1, xx + 1))
-                        && val >= arr.uget((2, y - 1, xx))
-                        && val >= arr.uget((2, y - 1, xx - 1))
-                } else {
-                    *val < value_threshold
-                        && val <= arr.uget((1, y, xx - 1))
-                        && val <= arr.uget((1, y, xx + 1))
-                        && val <= arr.uget((1, y + 1, xx + 1))
-                        && val <= arr.uget((1, y + 1, xx))
-                        && val <= arr.uget((1, y + 1, xx - 1))
-                        && val <= arr.uget((1, y - 1, xx + 1))
-                        && val <= arr.uget((1, y - 1, xx))
-                        && val <= arr.uget((1, y - 1, xx - 1))
-                        && val <= arr.uget((0, y, xx - 1))
-                        && val <= arr.uget((0, y, xx))
-                        && val <= arr.uget((0, y, xx + 1))
-                        && val <= arr.uget((0, y + 1, xx + 1))
-                        && val <= arr.uget((0, y + 1, xx))
-                        && val <= arr.uget((0, y + 1, xx - 1))
-                        && val <= arr.uget((0, y - 1, xx + 1))
-                        && val <= arr.uget((0, y - 1, xx))
-                        && val <= arr.uget((0, y - 1, xx - 1))
-                        && val <= arr.uget((2, y, xx - 1))
-                        && val <= arr.uget((2, y, xx))
-                        && val <= arr.uget((2, y, xx + 1))
-                        && val <= arr.uget((2, y + 1, xx + 1))
-                        && val <= arr.uget((2, y + 1, xx))
-                        && val <= arr.uget((2, y + 1, xx - 1))
-                        && val <= arr.uget((2, y - 1, xx + 1))
-                        && val <= arr.uget((2, y - 1, xx))
-                        && val <= arr.uget((2, y - 1, xx - 1))
-                };
-                scratch[buf_idx] = c;
-                buf_idx += 1;
-                x += 1;
-            }
             buf_idx += 2 * border;
         }
     }
@@ -347,7 +291,17 @@ unsafe fn local_extrema_avx2<T, CallerData: Copy>(
             if *extr {
                 let ey = (buf_start + idx) / (nx as usize);
                 let ex = (buf_start + idx) - ey * nx as usize;
-                discard_or_process(ex, ey, caller_data, &mut extrema);
+                if let Some(res) = discard_or_interpolate_extremum(
+                    ScaleSpacePoint {
+                        scale,
+                        x: ex,
+                        y: ey,
+                    },
+                    arr,
+                    dog,
+                ) {
+                    extrema.push(res);
+                }
             }
         });
     extrema
