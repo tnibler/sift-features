@@ -16,6 +16,8 @@
 // ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 use core::f32;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::__m256;
 
 use aligned_vec::{avec, AVec, ConstAlign};
 
@@ -39,10 +41,17 @@ pub fn atan2(
 ) -> AVec<f32, ConstAlign<32>> {
     assert_eq!(xs_aligned.len(), ys_aligned.len());
     assert_eq!(ys_aligned.as_ptr() as usize % 32, 0);
+
+    let tail: usize = 0;
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
     let tail = if is_x86_feature_detected!("avx2") {
         let tail = xs_aligned.len() - (xs_aligned.len() % 8);
         unsafe {
-            atan2_avx2(&mut xs_aligned[..tail], &ys_aligned[..tail]);
+            atan2_arr_avx2(&mut xs_aligned[..tail], &ys_aligned[..tail]);
         }
         tail
     } else {
@@ -73,50 +82,65 @@ fn atan2_single(x: f32, y: f32) -> f32 {
     }
 }
 
-#[target_feature(enable = "avx2")]
-unsafe fn atan2_avx2(xs_out: &mut [f32], ys: &[f32]) {
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+))]
+unsafe fn atan2_arr_avx2(xs_out: &mut [f32], ys: &[f32]) {
     use std::arch::x86_64::*;
-    let pi = _mm256_set1_ps(f32::consts::PI);
-    let pi_2 = _mm256_set1_ps(f32::consts::FRAC_PI_2);
 
-    let abs_mask = _mm256_castsi256_ps(_mm256_set1_epi32(i32::MAX));
-    let sign_mask = _mm256_castsi256_ps(_mm256_set1_epi32(i32::MIN));
+    for i in (0..xs_out.len()).step_by(8) {
+        let y = _mm256_load_ps(&ys[i]);
+        let x = _mm256_load_ps(&xs_out[i]);
+        _mm256_store_ps(xs_out.as_mut_ptr().add(i), atan2_avx2(x, y));
+    }
+}
 
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+))]
+#[inline]
+pub unsafe fn atan2_avx2(x: __m256, y: __m256) -> __m256 {
+    use std::arch::x86_64::*;
     let a1 = _mm256_set1_ps(A1);
     let a3 = _mm256_set1_ps(A3);
     let a5 = _mm256_set1_ps(A5);
     let a7 = _mm256_set1_ps(A7);
     let a9 = _mm256_set1_ps(A9);
     let a11 = _mm256_set1_ps(A11);
-    for i in (0..xs_out.len()).step_by(8) {
-        let y = _mm256_load_ps(&ys[i]);
-        let x = _mm256_load_ps(&xs_out[i]);
-        let abs_y = _mm256_and_ps(abs_mask, y);
-        let abs_x = _mm256_and_ps(abs_mask, x);
-        let a = _mm256_div_ps(_mm256_min_ps(abs_x, abs_y), _mm256_max_ps(abs_x, abs_y));
+    let pi = _mm256_set1_ps(f32::consts::PI);
+    let pi_2 = _mm256_set1_ps(f32::consts::FRAC_PI_2);
 
-        let asq = _mm256_mul_ps(a, a);
+    let abs_mask = _mm256_castsi256_ps(_mm256_set1_epi32(i32::MAX));
+    let sign_mask = _mm256_castsi256_ps(_mm256_set1_epi32(i32::MIN));
+    let abs_y = _mm256_and_ps(abs_mask, y);
+    let abs_x = _mm256_and_ps(abs_mask, x);
+    let a = _mm256_div_ps(_mm256_min_ps(abs_x, abs_y), _mm256_max_ps(abs_x, abs_y));
 
-        let result = a11;
-        let result = _mm256_fmadd_ps(asq, result, a9);
-        let result = _mm256_fmadd_ps(asq, result, a7);
-        let result = _mm256_fmadd_ps(asq, result, a5);
-        let result = _mm256_fmadd_ps(asq, result, a3);
-        let result = _mm256_fmadd_ps(asq, result, a1);
-        let result = _mm256_mul_ps(a, result);
+    let asq = _mm256_mul_ps(a, a);
 
-        let swap_mask = _mm256_cmp_ps(abs_y, abs_x, _CMP_GT_OQ);
-        let result = _mm256_add_ps(
-            _mm256_xor_ps(result, _mm256_and_ps(sign_mask, swap_mask)),
-            _mm256_and_ps(pi_2, swap_mask),
-        );
+    let result = a11;
+    let result = _mm256_fmadd_ps(asq, result, a9);
+    let result = _mm256_fmadd_ps(asq, result, a7);
+    let result = _mm256_fmadd_ps(asq, result, a5);
+    let result = _mm256_fmadd_ps(asq, result, a3);
+    let result = _mm256_fmadd_ps(asq, result, a1);
+    let result = _mm256_mul_ps(a, result);
 
-        let x_sign_mask = _mm256_castsi256_ps(_mm256_srai_epi32(_mm256_castps_si256(x), 31));
-        let result = _mm256_add_ps(
-            _mm256_xor_ps(result, _mm256_and_ps(x, sign_mask)),
-            _mm256_and_ps(pi, x_sign_mask),
-        );
-        let result = _mm256_xor_ps(result, _mm256_and_ps(y, sign_mask));
-        _mm256_store_ps(xs_out.as_mut_ptr().add(i), result);
-    }
+    let swap_mask = _mm256_cmp_ps(abs_y, abs_x, _CMP_GT_OQ);
+    let result = _mm256_add_ps(
+        _mm256_xor_ps(result, _mm256_and_ps(sign_mask, swap_mask)),
+        _mm256_and_ps(pi_2, swap_mask),
+    );
+
+    let x_sign_mask = _mm256_castsi256_ps(_mm256_srai_epi32(_mm256_castps_si256(x), 31));
+    let result = _mm256_add_ps(
+        _mm256_xor_ps(result, _mm256_and_ps(x, sign_mask)),
+        _mm256_and_ps(pi, x_sign_mask),
+    );
+    let result = _mm256_xor_ps(result, _mm256_and_ps(y, sign_mask));
+    result
 }

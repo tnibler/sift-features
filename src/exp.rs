@@ -26,6 +26,8 @@
 //  3. This notice may not be removed or altered from any source distribution.
 //  (this is the zlib license)
 use core::f32;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::__m256;
 
 use aligned_vec::{avec, AVec, ConstAlign};
 
@@ -40,7 +42,7 @@ pub fn exp(mut xs_aligned: AVec<f32, ConstAlign<32>>) -> AVec<f32, ConstAlign<32
     let tail = if is_x86_feature_detected!("avx2") {
         let tail = xs_aligned.len() - (xs_aligned.len() % 8);
         unsafe {
-            exp_avx2(&mut xs_aligned[..tail]);
+            exp_arr_avx2(&mut xs_aligned[..tail]);
         }
         tail
     } else {
@@ -74,7 +76,20 @@ fn exp_single(x: f32) -> f32 {
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn exp_avx2(xs: &mut [f32]) {
+unsafe fn exp_arr_avx2(xs: &mut [f32]) {
+    use std::arch::x86_64::*;
+
+    for i in (0..xs.len()).step_by(8) {
+        let ptr = xs.as_mut_ptr().add(i);
+        let x = _mm256_load_ps(ptr);
+        _mm256_store_ps(ptr, exp_avx2(x));
+    }
+}
+
+#[target_feature(enable = "fma")]
+#[target_feature(enable = "avx2")]
+#[inline]
+pub unsafe fn exp_avx2(x: __m256) -> __m256 {
     use std::arch::x86_64::*;
     let log2e = _mm256_set1_ps(f32::consts::LOG2_E);
     let ln2 = _mm256_set1_ps(f32::consts::LN_2);
@@ -88,34 +103,30 @@ unsafe fn exp_avx2(xs: &mut [f32]) {
     let p4 = _mm256_set1_ps(P4);
     let p5 = _mm256_set1_ps(P5);
 
-    for i in (0..xs.len()).step_by(8) {
-        let ptr = xs.as_mut_ptr().add(i);
-        let x = _mm256_load_ps(ptr);
-        let x = _mm256_min_ps(x, exp_hi);
-        let x = _mm256_max_ps(x, exp_lo);
+    let x = _mm256_min_ps(x, exp_hi);
+    let x = _mm256_max_ps(x, exp_lo);
 
-        let fx = _mm256_mul_ps(x, log2e);
-        let fx = _mm256_round_ps(fx, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-        let z = _mm256_mul_ps(fx, ln2);
-        let x = _mm256_sub_ps(x, z);
-        let z = _mm256_mul_ps(x, x);
+    let fx = _mm256_mul_ps(x, log2e);
+    let fx = _mm256_round_ps(fx, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    let z = _mm256_mul_ps(fx, ln2);
+    let x = _mm256_sub_ps(x, z);
+    let z = _mm256_mul_ps(x, x);
 
-        let y = p0;
-        let y = _mm256_fmadd_ps(y, x, p1);
-        let y = _mm256_fmadd_ps(y, x, p2);
-        let y = _mm256_fmadd_ps(y, x, p3);
-        let y = _mm256_fmadd_ps(y, x, p4);
-        let y = _mm256_fmadd_ps(y, x, p5);
-        let y = _mm256_fmadd_ps(y, z, x);
-        let y = _mm256_add_ps(y, one);
+    let y = p0;
+    let y = _mm256_fmadd_ps(y, x, p1);
+    let y = _mm256_fmadd_ps(y, x, p2);
+    let y = _mm256_fmadd_ps(y, x, p3);
+    let y = _mm256_fmadd_ps(y, x, p4);
+    let y = _mm256_fmadd_ps(y, x, p5);
+    let y = _mm256_fmadd_ps(y, z, x);
+    let y = _mm256_add_ps(y, one);
 
-        let imm0 = _mm256_cvttps_epi32(fx);
-        let imm0 = _mm256_add_epi32(imm0, _mm256_set1_epi32(0x7f));
-        let imm0 = _mm256_slli_epi32(imm0, 23);
-        let pow2n = _mm256_castsi256_ps(imm0);
-        let y = _mm256_mul_ps(y, pow2n);
-        _mm256_store_ps(ptr, y);
-    }
+    let imm0 = _mm256_cvttps_epi32(fx);
+    let imm0 = _mm256_add_epi32(imm0, _mm256_set1_epi32(0x7f));
+    let imm0 = _mm256_slli_epi32(imm0, 23);
+    let pow2n = _mm256_castsi256_ps(imm0);
+    let y = _mm256_mul_ps(y, pow2n);
+    y
 }
 
 #[test]

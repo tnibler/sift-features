@@ -713,49 +713,34 @@ fn gradient_direction_histogram(
     let grads_y = grads_y;
     let grad_weights = grad_weights;
 
-    // Finalizing the term in Eq. (20) in [4]
-    let grad_weights = exp::exp(grad_weights);
-    // gradient magnitudes
-    let magnitudes: AVec<f32, ConstAlign<32>> = AVec::from_iter(
-        32,
-        grads_x
-            .iter()
-            .zip(grads_y.iter())
-            .map(|(x, y)| (x * x + y * y).sqrt()),
-    );
-
-    let orientations = atan2::atan2(grads_x, &grads_y);
-
     // Range of angles (radians) assigned to one histogram bin
     let bin_angle_step = n_bins as f32 / (PI32 * 2.);
-    // Histogram bin index as given by Eq. (21) in [4]
-    let hist_bin = orientations.into_iter().map(|ori| {
-        // TODO: this is slow, vectorize
-        assert!((-PI32..=PI32).contains(&ori));
-        let raw_bin = bin_angle_step * ori;
-        // raw_bin is in range [-PI * (n_bins / 2PI); PI * (n_bins / 2PI)]
-        //                    =[-n_bins / 2; n_bins / 2];
-        assert!(-(n_bins as f32) / 2. <= raw_bin && raw_bin <= n_bins as f32 / 2.);
-        let bin: i32 = raw_bin.round() as i32;
-        if bin >= n_bins as i32 {
-            (bin - n_bins as i32) as usize
-        } else if bin < 0 {
-            assert!(bin + n_bins as i32 >= 0);
-            (bin + n_bins as i32) as usize
-        } else {
-            bin as usize
-        }
-    });
+    let mut raw_hist = vec![0.0; n_bins + 4];
 
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                orihist(
+                    &grads_x,
+                    &grads_y,
+                    &grad_weights,
+                    n_bins,
+                    bin_angle_step,
+                    &mut raw_hist,
+                );
+            }
+        }
+    }
     // The gradient orientation histogram undergoes a final smoothing step.
     // In [4], smoothing is done by convolving 6 times with a kernel of [1/3, 1/3, 1/3].
     // In OpenCV, the kernel [1/16, 4/16, 6/16, 4/16, 1/16] is instead used one time only.
     // raw_hist has length n_bins + 4 because the convolution is circular/cyclic and  wraps around,
     // so we copy the first and last 2 values to the other end of the histogram to get this wrapping.
-    let mut raw_hist = vec![0.0; n_bins + 4];
-    izip!(hist_bin, magnitudes.iter(), grad_weights.iter()).for_each(|(bin, mag, weight)| {
-        raw_hist[bin + 2] += weight * mag;
-    });
     raw_hist[1] = raw_hist[n_bins + 1];
     raw_hist[0] = raw_hist[n_bins];
     raw_hist[n_bins + 2] = raw_hist[2];
@@ -767,6 +752,120 @@ fn gradient_direction_histogram(
             + raw_hist[i] * 6. / 16.;
     }
     hist
+}
+
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+))]
+#[inline]
+unsafe fn orihist(
+    grads_x: &[f32],
+    grads_y: &[f32],
+    grad_weights: &[f32],
+    n_bins: usize,
+    bin_angle_step: f32,
+    raw_hist: &mut [f32],
+) {
+    assert_eq!(grads_x.len(), grads_y.len());
+    assert_eq!(grads_x.len(), grad_weights.len());
+    assert_eq!(raw_hist.len(), n_bins + 4);
+    assert_eq!(grads_x.as_ptr() as usize % 32, 0);
+    assert_eq!(grads_y.as_ptr() as usize % 32, 0);
+    assert_eq!(grad_weights.as_ptr() as usize % 32, 0);
+    use std::arch::x86_64::*;
+    let bin_angle_step = _mm256_set1_ps(bin_angle_step);
+    let n_bins = _mm256_set1_epi32(n_bins as i32);
+    let mut mask = _mm256_set1_epi32(i32::MIN);
+    let masks: [_; 8] = [
+        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, 0),
+        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, i32::MIN),
+        _mm256_set_epi32(0, 0, 0, 0, 0, 0, i32::MIN, i32::MIN),
+        _mm256_set_epi32(0, 0, 0, 0, 0, i32::MIN, i32::MIN, i32::MIN),
+        _mm256_set_epi32(0, 0, 0, 0, i32::MIN, i32::MIN, i32::MIN, i32::MIN),
+        _mm256_set_epi32(0, 0, 0, i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN),
+        _mm256_set_epi32(
+            0,
+            0,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+        ),
+        _mm256_set_epi32(
+            0,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+        ),
+    ];
+    let mut tmp_bins = [0_i32; 8];
+    let mut tmp_histval = [0_f32; 8];
+    for i in (0..grads_x.len()).step_by(8) {
+        let dist = grads_x.len() - i;
+        if dist < 8 {
+            mask = masks[dist];
+        };
+        let dx = _mm256_maskload_ps(grads_x.as_ptr().add(i), mask);
+        let dy = _mm256_maskload_ps(grads_y.as_ptr().add(i), mask);
+        let w = {
+            let w = _mm256_maskload_ps(&grad_weights[i], mask);
+            exp::exp_avx2(w)
+        };
+        let ori = atan2::atan2_avx2(dx, dy);
+        //println!("dist={dist}");
+        //println!("mask={:?}", std::mem::transmute::<_, [i32; 8]>(mask));
+        //println!("{:?}", dx);
+        //println!("{:?}", dy);
+        let mag = {
+            let xsq = _mm256_mul_ps(dx, dx);
+            let mag2 = _mm256_fmadd_ps(dy, dy, xsq);
+            _mm256_sqrt_ps(mag2)
+        };
+        let bin = _mm256_round_ps::<_MM_FROUND_TO_NEAREST_INT>(_mm256_mul_ps(bin_angle_step, ori));
+        let bin = _mm256_cvtps_epi32(bin);
+        //println!("{:?}", std::mem::transmute::<_, [i32; 8]>(bin));
+        //use sign bit of bin to select bin or bin + n_vins
+        let bin = _mm256_blendv_ps(
+            _mm256_castsi256_ps(bin),
+            _mm256_castsi256_ps(_mm256_add_epi32(bin, n_bins)),
+            _mm256_castsi256_ps(bin),
+        );
+        //println!("{:?}", std::mem::transmute::<_, [i32; 8]>(bin));
+        let bin = _mm256_castps_si256(bin);
+        // same between bin and bin - n_bins
+        let bin = _mm256_blendv_ps(
+            _mm256_castsi256_ps(bin),
+            _mm256_castsi256_ps(_mm256_sub_epi32(bin, n_bins)),
+            _mm256_castsi256_ps(_mm256_cmpgt_epi32(bin, n_bins)),
+        );
+        //let bin = _mm256_blendv_ps(
+        //    _mm256_castsi256_ps(_mm256_set1_epi32(-2)),
+        //    bin,
+        //    grad_nonzero_mask,
+        //);
+        //println!("{:?}\n", std::mem::transmute::<_, [i32; 8]>(bin));
+        let bin = _mm256_castps_si256(bin);
+        let bin = _mm256_add_epi32(bin, _mm256_set1_epi32(2));
+        _mm256_maskstore_epi32(tmp_bins.as_mut_ptr(), mask, bin);
+        let histval = _mm256_mul_ps(w, mag);
+        //println!("wei={:?}", w);
+        //println!("mag={:?}", mag);
+        _mm256_maskstore_ps(tmp_histval.as_mut_ptr(), mask, histval);
+        for j in 0..8 {
+            if j + i > grads_x.len() {
+                break;
+            }
+            *raw_hist.get_unchecked_mut(tmp_bins[j] as usize) += tmp_histval[j];
+        }
+    }
 }
 
 fn compute_descriptors(scale_space: &[Array3<f32>], keypoints: &[SiftKeyPoint]) -> Array2<u8> {
