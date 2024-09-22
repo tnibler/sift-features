@@ -87,6 +87,7 @@ pub fn compute_descriptor(
                     let dy = img[(abs_y - 1, abs_x)] - img[(abs_y + 1, abs_x)];
 
                     if dx == 0. && dy == 0. {
+                        //println!("drop {}, {}", abs_x, abs_y);
                         return None;
                     }
 
@@ -95,6 +96,7 @@ pub fn compute_descriptor(
                     let weight = col_rotated.powi(2) + row_rotated.powi(2);
                     Some((dx, dy, row_bin, col_bin, weight))
                 } else {
+                    //println!("drop {}, {}", abs_x, abs_y);
                     None
                 }
             })
@@ -116,17 +118,6 @@ pub fn compute_descriptor(
     let weights: AVec<_, ConstAlign<ALIGN>> =
         AVec::from_iter(ALIGN, weights.iter().map(|x| (x * weight_scale).exp()));
     // Gradient orientations in patch normalized wrt to the keypoint's reference orientation.
-    //let normalized_orienations: AVec<_, ConstAlign<ALIGN>> = AVec::from_iter(
-    //    ALIGN,
-    //    gradients_x
-    //        .into_iter()
-    //        .zip(gradients_y.iter())
-    //        .map(|(x, y)| {
-    //            let x: f64 = *x as f64;
-    //            let y: f64 = *y as f64;
-    //            ((y.atan2(x).to_degrees() + 360.0) % 360.0) as f32 - orientation
-    //        }),
-    //);
     let atans = atan2::atan2(gradients_x.clone(), &gradients_y);
     let normalized_orienations: AVec<_, ConstAlign<ALIGN>> = AVec::from_iter(
         ALIGN,
@@ -152,24 +143,24 @@ pub fn compute_descriptor(
         ArrayViewMut3::from_shape((n_hist + 2, n_hist + 2, DESCRIPTOR_N_BINS), &mut hist_buf)
             .expect("shape matches");
 
-    #[cfg(target_arch = "x86_64")]
-    #[cfg(target_arch = "x86_64")]
-    let tail = if is_x86_feature_detected!("avx2") {
-        let tail: usize = row_bins.len() - (row_bins.len() % 8);
-        unsafe {
-            histogram_avx2(
-                &row_bins[..tail],
-                &col_bins[..tail],
-                &normalized_orienations[..tail],
-                &magnitude[..tail],
-                &weights[..tail],
-                &mut hist.view_mut(),
-            );
-        }
-        tail
-    } else {
-        0
-    };
+    //#[cfg(target_arch = "x86_64")]
+    //let tail = if is_x86_feature_detected!("avx2") {
+    //    let tail: usize = row_bins.len() - (row_bins.len() % 8);
+    //    unsafe {
+    //        histogram_avx2(
+    //            &row_bins[..tail],
+    //            &col_bins[..tail],
+    //            &normalized_orienations[..tail],
+    //            &magnitude[..tail],
+    //            &weights[..tail],
+    //            &mut hist.view_mut(),
+    //        );
+    //    }
+    //    tail
+    //} else {
+    //    0
+    //};
+    let tail = 0;
 
     // Spread each sample point's contribution to its 8 neighbouring histograms based on its distance
     // from the histogram window's center and weighted by the sample's gradient magnitude.
@@ -178,9 +169,10 @@ pub fn compute_descriptor(
         col_bins[tail..].iter(),
         normalized_orienations[tail..].iter(),
         magnitude[tail..].iter(),
-        weights[tail..].iter()
+        weights[tail..].iter(),
+        gradients_y.iter()
     )
-    .for_each(|(row_bin, col_bin, orientation, mag, weight)| {
+    .for_each(|(row_bin, col_bin, orientation, mag, weight, dy)| {
         // Subtracting 0.5 here because the trilinear interpolation (the reverse actually)
         // below works on the {-0.5, 0.5}^3 cube, but our histograms are located in {0, 1}^ cubes.
         let row_bin = row_bin - 0.5;
@@ -231,6 +223,79 @@ pub fn compute_descriptor(
             ori_floor + 1
         };
 
+        //println!(
+        //    "{}, {}, {}, {}, {}, {}",
+        //    row_floor_p1 * (n_hist + 2) * n_bins + col_floor_p1 * n_bins + ori_floor,
+        //    c000,
+        //    row_bin,
+        //    col_bin,
+        //    ori_bin,
+        //    dy
+        //);
+        //
+        //println!(
+        //    "{}, {}, {}, {}, {}",
+        //    row_floor_p1 * (n_hist + 2) * n_bins + col_floor_p1 * n_bins + ori_floor_p1,
+        //    c001,
+        //    row_bin,
+        //    col_bin,
+        //    ori_bin,
+        //);
+        //
+        //println!(
+        //    "{}, {}, {}, {}, {}",
+        //    row_floor_p1 * (n_hist + 2) * n_bins + col_floor_p2 * n_bins + ori_floor,
+        //    c010,
+        //    row_bin,
+        //    col_bin,
+        //    ori_bin
+        //);
+        //
+        //println!(
+        //    "{}, {}, {}, {}, {}",
+        //    row_floor_p1 * (n_hist + 2) * n_bins + col_floor_p2 * n_bins + ori_floor_p1,
+        //    c011,
+        //    row_bin,
+        //    col_bin,
+        //    ori_bin
+        //);
+        //
+        //println!(
+        //    "{}, {}, {}, {}, {}",
+        //    row_floor_p2 * (n_hist + 2) * n_bins + col_floor_p1 * n_bins + ori_floor,
+        //    c100,
+        //    row_bin,
+        //    col_bin,
+        //    ori_bin
+        //);
+        //
+        //println!(
+        //    "{}, {}, {}, {}, {}",
+        //    row_floor_p2 * (n_hist + 2) * n_bins + col_floor_p1 * n_bins + ori_floor_p1,
+        //    c101,
+        //    row_bin,
+        //    col_bin,
+        //    ori_bin
+        //);
+        //
+        //println!(
+        //    "{}, {}, {}, {}, {}",
+        //    row_floor_p2 * (n_hist + 2) * n_bins + col_floor_p2 * n_bins + ori_floor,
+        //    c110,
+        //    row_bin,
+        //    col_bin,
+        //    ori_bin
+        //);
+        //
+        //println!(
+        //    "{}, {}, {}, {}, {}",
+        //    row_floor_p2 * (n_hist + 2) * n_bins + col_floor_p2 * n_bins + ori_floor_p1,
+        //    c111,
+        //    row_bin,
+        //    col_bin,
+        //    ori_bin
+        //);
+
         hist[(row_floor_p1, col_floor_p1, ori_floor)] += c000;
         hist[(row_floor_p1, col_floor_p1, ori_floor_p1)] += c001;
         hist[(row_floor_p1, col_floor_p2, ori_floor)] += c010;
@@ -242,13 +307,16 @@ pub fn compute_descriptor(
     });
 
     let mse = (&hist - &hist_avx).mapv(|x| x.powi(2)).mean().unwrap();
-    println!(
-        "mse={mse}, max={}",
-        hist.iter().max_by(|a, b| a.total_cmp(b)).unwrap()
-    );
+    let maxerr = (&hist - &hist_avx)
+        .abs()
+        .iter()
+        .copied()
+        .max_by(|a, b| f32::total_cmp(a, b))
+        .unwrap();
+    println!("mse={mse}, maxerr={}", maxerr);
 
     #[allow(clippy::reversed_empty_ranges)]
-    let mut hist_flat = hist.slice_move(s![1..-1, 1..-1, ..]).to_owned();
+    let mut hist_flat = hist_avx.slice_move(s![1..-1, 1..-1, ..]).to_owned();
     let hist_sl = hist_flat.as_slice().expect("array is flat");
 
     const DESCRIPTOR_MAGNITUDE_CAP: f32 = 0.2;
@@ -319,15 +387,9 @@ unsafe fn compute_descriptor_avx2(
     let img_ptr = img.as_ptr();
 
     let masks: [_; 8] = [
-        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, 0),
-        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, i32::MIN),
-        _mm256_set_epi32(0, 0, 0, 0, 0, 0, i32::MIN, i32::MIN),
-        _mm256_set_epi32(0, 0, 0, 0, 0, i32::MIN, i32::MIN, i32::MIN),
-        _mm256_set_epi32(0, 0, 0, 0, i32::MIN, i32::MIN, i32::MIN, i32::MIN),
-        _mm256_set_epi32(0, 0, 0, i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN),
         _mm256_set_epi32(
-            0,
-            0,
+            i32::MIN,
+            i32::MIN,
             i32::MIN,
             i32::MIN,
             i32::MIN,
@@ -336,15 +398,30 @@ unsafe fn compute_descriptor_avx2(
             i32::MIN,
         ),
         _mm256_set_epi32(
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
             0,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
         ),
+        _mm256_set_epi32(
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            0,
+            0,
+        ),
+        _mm256_set_epi32(i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN, 0, 0, 0),
+        _mm256_set_epi32(i32::MIN, i32::MIN, i32::MIN, i32::MIN, 0, 0, 0, 0),
+        _mm256_set_epi32(i32::MIN, i32::MIN, i32::MIN, 0, 0, 0, 0, 0),
+        _mm256_set_epi32(i32::MIN, i32::MIN, 0, 0, 0, 0, 0, 0),
+        _mm256_set_epi32(i32::MIN, 0, 0, 0, 0, 0, 0, 0),
     ];
     let nhist_half = _mm256_set1_ps((nhist / 2) as f32);
     let nhist_plus_half = _mm256_set1_ps(nhist as f32 + 0.5);
@@ -421,8 +498,8 @@ unsafe fn compute_descriptor_avx2(
             assert!(x_abs > 0);
             let x_abs = x_abs as u32;
             assert!((x_abs as u32) < width - 1);
-            let mask = if x_abs + 8 > width {
-                masks[(8 - (width - x_abs)) as usize]
+            let mask = if (x_abs + 8) as i32 > x_winend + x as i32 {
+                masks[(8 - (x_winend + x as i32 - x_abs as i32)) as usize]
             } else {
                 mask_all
             };
@@ -576,6 +653,27 @@ unsafe fn compute_descriptor_avx2(
 
             let ori_floor = _mm256_cvttps_epi32(ori_floor);
 
+            let dydbg = {
+                let mut v = [0_f32; 8];
+                _mm256_storeu_ps(v.as_mut_ptr(), dy);
+                v
+            };
+            let rowdbg = {
+                let mut v = [0_f32; 8];
+                _mm256_storeu_ps(v.as_mut_ptr(), row_bin);
+                v
+            };
+            let coldbg = {
+                let mut v = [0_f32; 8];
+                _mm256_storeu_ps(v.as_mut_ptr(), col_bin);
+                v
+            };
+            let oridbg = {
+                let mut v = [0_f32; 8];
+                _mm256_storeu_ps(v.as_mut_ptr(), ori_bin);
+                v
+            };
+
             let row_floor_p1 = {
                 let mut v = [0_i32; 8];
                 _mm256_storeu_si256(v.as_mut_ptr() as *mut __m256i, row_floor_p1);
@@ -586,54 +684,80 @@ unsafe fn compute_descriptor_avx2(
                 _mm256_storeu_si256(v.as_mut_ptr() as *mut __m256i, col_floor_p1);
                 v
             };
-            let mut permute = _mm256_setzero_si256();
             let msk = {
                 let mut v = [0_i32; 8];
                 _mm256_storeu_si256(v.as_mut_ptr() as *mut __m256i, mask);
                 v
             };
             for j in 0..8 {
-                if msk[j] != 0 {
-                    let ori_p1s = _mm256_set_epi32(1, 0, 1, 0, 1, 0, 1, 0);
-                    let ori_single = _mm256_permutevar8x32_epi32(ori_floor, permute);
-                    let ori_idx_offset =
-                        _mm256_and_si256(_mm256_add_epi32(ori_single, ori_p1s), mod_nbins_mask);
-                    let idx_base = _mm256_set1_epi32(
-                        row_floor_p1[j] * (nhist as i32 + 2) * nbins as i32
-                            + col_floor_p1[j] * nbins as i32,
-                    );
-                    let idx =
-                        _mm256_add_epi32(_mm256_add_epi32(idx_base, index_offsets), ori_idx_offset);
-                    let idx = {
-                        let mut v = [0_i32; 8];
-                        _mm256_storeu_si256(v.as_mut_ptr() as *mut __m256i, idx);
-                        v
-                    };
-                    //println!("{idx:?}");
-                    //println!(
-                    //    "{}, {}, {}, {}, {}, {}, {}, {}",
-                    //    buf000[j],
-                    //    buf000[j],
-                    //    buf010[j],
-                    //    buf011[j],
-                    //    buf100[j],
-                    //    buf101[j],
-                    //    buf110[j],
-                    //    buf111[j],
-                    //);
-                    hist[idx[0] as usize] += buf000[j];
-                    hist[idx[1] as usize] += buf000[j];
-                    hist[idx[2] as usize] += buf010[j];
-                    hist[idx[3] as usize] += buf011[j];
-                    hist[idx[4] as usize] += buf100[j];
-                    hist[idx[5] as usize] += buf101[j];
-                    hist[idx[6] as usize] += buf110[j];
-                    hist[idx[7] as usize] += buf111[j];
+                if msk[j] == 0 {
+                    //println!("drop {}, {}", x_abs_ as usize + j, y_abs_);
+                    continue;
                 }
-                permute = _mm256_add_epi32(permute, _mm256_set1_epi32(1));
+                let ori_alt_ones = _mm256_set_epi32(1, 0, 1, 0, 1, 0, 1, 0);
+                // set every element to ori_floor[j]
+                let ori_single =
+                    _mm256_permutevar8x32_epi32(ori_floor, _mm256_set1_epi32(j as i32));
+
+                let ori_idx_offset =
+                    _mm256_and_si256(_mm256_add_epi32(ori_single, ori_alt_ones), mod_nbins_mask);
+                // TODO: this can also be done with permutevar same way as ori!
+                let idx_base = _mm256_set1_epi32(
+                    row_floor_p1[j] * (nhist as i32 + 2) * nbins as i32
+                        + col_floor_p1[j] * nbins as i32,
+                );
+                let idx =
+                    _mm256_add_epi32(_mm256_add_epi32(idx_base, index_offsets), ori_idx_offset);
+                let idx = {
+                    let mut v = [0_i32; 8];
+                    _mm256_storeu_si256(v.as_mut_ptr() as *mut __m256i, idx);
+                    v
+                };
+                //println!(
+                //    "{}, {}, {}, {}, {}, {}",
+                //    idx[0], buf000[j], rowdbg[j], coldbg[j], oridbg[j], dydbg[j]
+                //);
+                //println!(
+                //    "{}, {}, {}, {}, {}, {}",
+                //    idx[1], buf001[j], rowdbg[j], coldbg[j], oridbg[j], dydbg[j]
+                //);
+                //println!(
+                //    "{}, {}, {}, {}, {}, {}",
+                //    idx[2], buf010[j], rowdbg[j], coldbg[j], oridbg[j], dydbg[j]
+                //);
+                //println!(
+                //    "{}, {}, {}, {}, {}, {}",
+                //    idx[3], buf011[j], rowdbg[j], coldbg[j], oridbg[j], dydbg[j]
+                //);
+                //println!(
+                //    "{}, {}, {}, {}, {}, {}",
+                //    idx[4], buf100[j], rowdbg[j], coldbg[j], oridbg[j], dydbg[j]
+                //);
+                //println!(
+                //    "{}, {}, {}, {}, {}, {}",
+                //    idx[5], buf101[j], rowdbg[j], coldbg[j], oridbg[j], dydbg[j]
+                //);
+                //println!(
+                //    "{}, {}, {}, {}, {}, {}",
+                //    idx[6], buf110[j], rowdbg[j], coldbg[j], oridbg[j], dydbg[j]
+                //);
+                //println!(
+                //    "{}, {}, {}, {}, {}, {}",
+                //    idx[7], buf111[j], rowdbg[j], coldbg[j], oridbg[j], dydbg[j]
+                //);
+
+                hist[idx[0] as usize] += buf000[j];
+                hist[idx[1] as usize] += buf001[j];
+                hist[idx[2] as usize] += buf010[j];
+                hist[idx[3] as usize] += buf011[j];
+                hist[idx[4] as usize] += buf100[j];
+                hist[idx[5] as usize] += buf101[j];
+                hist[idx[6] as usize] += buf110[j];
+                hist[idx[7] as usize] += buf111[j];
             }
         }
     }
+    println!("\n\n\n");
     hist
 }
 
@@ -758,18 +882,12 @@ unsafe fn histogram_avx2(
 
         let row_floor_p1 = {
             let mut v = [0_i32; 8];
-            _mm256_storeu_si256(
-                transmute::<*mut i32, *mut __m256i>(v.as_mut_ptr()),
-                row_floor_p1,
-            );
+            _mm256_storeu_si256(v.as_mut_ptr() as *mut __m256i, row_floor_p1);
             v
         };
         let col_floor_p1 = {
             let mut v = [0_i32; 8];
-            _mm256_storeu_si256(
-                transmute::<*mut i32, *mut __m256i>(v.as_mut_ptr()),
-                col_floor_p1,
-            );
+            _mm256_storeu_si256(v.as_mut_ptr() as *mut __m256i, col_floor_p1);
             v
         };
         let nhist = nhist as usize;
