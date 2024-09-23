@@ -12,6 +12,8 @@ use crate::{
 };
 
 const BIN_ANGLE_STEP: f32 = DESCRIPTOR_N_BINS as f32 / 360.0;
+const DESCRIPTOR_L2_NORM: f32 = 512.0;
+const DESCRIPTOR_MAGNITUDE_CAP: f32 = 0.2;
 
 pub fn compute_descriptor(
     img: &ArrayView2<f32>,
@@ -35,11 +37,15 @@ pub fn compute_descriptor(
 
     #[allow(clippy::reversed_empty_ranges)]
     let mut hist_flat = hist.slice_move(s![1..-1, 1..-1, ..]).to_owned();
-    let hist_sl = hist_flat.as_slice().expect("array is flat");
 
-    const DESCRIPTOR_MAGNITUDE_CAP: f32 = 0.2;
     let mut l2_sq = 0.0;
     hist_flat.iter().for_each(|x| l2_sq += x.powi(2));
+    let hist_sl = hist_flat.as_slice_mut().expect("array is flat");
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        normalize_hist_avx2(hist_sl, out)
+    };
+    return;
     let l2_uncapped = hist_sl
         .chunks(4)
         .map(|xs| xs.iter().map(|x| x.powi(2)).sum())
@@ -61,7 +67,6 @@ pub fn compute_descriptor(
         .expect("array is not empty")
         .sqrt();
 
-    const DESCRIPTOR_L2_NORM: f32 = 512.0;
     let l2_normalizer = DESCRIPTOR_L2_NORM / l2_capped.max(f32::EPSILON);
 
     // Saturating cast to u8
@@ -79,6 +84,11 @@ pub fn compute_descriptor(
         .for_each(|(hist_el, out_el)| *out_el = hist_el);
 }
 
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+))]
 unsafe fn compute_descriptor_avx2(
     img: &ArrayView2<f32>,
     x: f32,
@@ -90,7 +100,6 @@ unsafe fn compute_descriptor_avx2(
     use std::arch::x86_64::*;
     assert_eq!(DESCRIPTOR_SIZE, out.len());
     let nhist = DESCRIPTOR_N_HISTOGRAMS;
-    let nbins = DESCRIPTOR_N_BINS;
     let height = img.shape()[0] as u32;
     let width = img.shape()[1] as u32;
     let x = x.round() as u32;
@@ -171,7 +180,6 @@ unsafe fn compute_descriptor_avx2(
     );
     let onehalf = _mm256_set1_ps(0.5);
     let onef = _mm256_set1_ps(1.);
-    let twof = _mm256_set1_ps(2.);
     let bin_angle_step = _mm256_set1_ps(BIN_ANGLE_STEP);
     let n_bins = _mm256_set1_epi32(DESCRIPTOR_N_BINS as i32);
     let mod_nbins_mask = _mm256_set1_epi32(DESCRIPTOR_N_BINS as i32 - 1);
@@ -191,27 +199,25 @@ unsafe fn compute_descriptor_avx2(
         )
     };
 
-    // -radius<=i<=radius
-    // y+i < height-1
-    // i start: max(-radius, -y+1)
-
     let y_winend: i32 = min(radius, height as i32 - 1 - y as i32);
     let y_winstart: i32 = min(y_winend, max(-radius, -(y as i32) + 1));
     let x_winend: i32 = min(radius, width as i32 - 1 - x as i32);
     let x_winstart: i32 = min(x_winend, max(-radius, -(x as i32) + 1));
-    //println!("rad={radius}, y={y}, height={height}");
-    //println!("{y_winstart}-{y_winend}");
 
     let x_ramp = _mm256_set_epi32(0, 1, 2, 3, 4, 5, 6, 7);
     let x_rampf = _mm256_set_ps(0., 1., 2., 3., 4., 5., 6., 7.);
     let mask_all = _mm256_set1_epi32(i32::MIN);
+    let mut pix_idx_rowstart = _mm256_add_epi32(
+        _mm256_set1_epi32((y as i32 + y_winstart) * width as i32 + x as i32 + x_winstart),
+        x_ramp,
+    );
+    let vwidth = _mm256_set1_epi32(width as i32);
     for y_win in y_winstart..y_winend {
         let y_abs = y as i32 + y_win;
-        let y_abs_ = y as i32 + y_win;
         assert!(y_abs > 0);
         assert!((y_abs as u32) < height - 1);
-        let y_abs = _mm256_set1_epi32(y_abs);
         let y_winf = _mm256_set1_ps(y_win as f32);
+        let mut pix_idx = pix_idx_rowstart;
         for x_win in (x_winstart..x_winend).step_by(8) {
             let x_abs = x as i32 + x_win;
             assert!(x_abs > 0);
@@ -222,9 +228,6 @@ unsafe fn compute_descriptor_avx2(
             } else {
                 mask_all
             };
-            //println!("oobmask={:?}", std::mem::transmute::<_, [f32; 8]>(mask));
-            let x_abs_ = x_abs;
-            let x_abs = _mm256_add_epi32(x_ramp, _mm256_set1_epi32(x_abs as i32));
             let x_winf = _mm256_add_ps(x_rampf, _mm256_set1_ps(x_win as f32));
 
             let col_rotated = _mm256_fmsub_ps(
@@ -239,8 +242,6 @@ unsafe fn compute_descriptor_avx2(
             );
             let row_bin = _mm256_add_ps(row_rotated, nhist_half);
             let col_bin = _mm256_add_ps(col_rotated, nhist_half);
-            //println!("rb={row_bin:?}");
-            //println!("cb={col_bin:?}");
             // row_bin > -0.5
             let mask = _mm256_and_ps(
                 _mm256_castsi256_ps(mask),
@@ -257,9 +258,6 @@ unsafe fn compute_descriptor_avx2(
             let mask = _mm256_and_ps(mask, _mm256_cmp_ps::<_CMP_LT_OQ>(col_bin, nhist_plus_half));
             //println!("binmask={:?}", std::mem::transmute::<_, [f32; 8]>(mask));
 
-            let width = _mm256_set1_epi32(width as i32);
-            // TODO: less muls and instructions to compute indices, all we need is +/- width or 1
-            let pix_idx = _mm256_add_epi32(_mm256_mullo_epi32(width, y_abs), x_abs);
             let dx = {
                 let idx1 = _mm256_add_epi32(pix_idx, _mm256_set1_epi32(1));
                 let idx2 = _mm256_sub_epi32(pix_idx, _mm256_set1_epi32(1));
@@ -268,8 +266,8 @@ unsafe fn compute_descriptor_avx2(
                 _mm256_sub_ps(v1, v2)
             };
             let dy = {
-                let idx1 = _mm256_sub_epi32(pix_idx, width);
-                let idx2 = _mm256_add_epi32(pix_idx, width);
+                let idx1 = _mm256_sub_epi32(pix_idx, vwidth);
+                let idx2 = _mm256_add_epi32(pix_idx, vwidth);
                 let v1 = _mm256_mask_i32gather_ps::<4>(_mm256_setzero_ps(), img_ptr, idx1, mask);
                 let v2 = _mm256_mask_i32gather_ps::<4>(_mm256_setzero_ps(), img_ptr, idx2, mask);
                 _mm256_sub_ps(v1, v2)
@@ -294,7 +292,6 @@ unsafe fn compute_descriptor_avx2(
 
             let magsq = _mm256_fmadd_ps(dx, dx, _mm256_mul_ps(dy, dy));
             let mag = _mm256_mul_ps(magsq, _mm256_rsqrt_ps(magsq));
-            //let mag = _mm256_sqrt_ps(magsq); // TODO use approx bove
             let atan = atan2::atan2_avx2(dx, dy);
             let deg = {
                 let deg = _mm256_mul_ps(atan, deg_per_rad);
@@ -399,9 +396,88 @@ unsafe fn compute_descriptor_avx2(
                 hist[idx[6] as usize] += buf110[j];
                 hist[idx[7] as usize] += buf111[j];
             }
+            // TODO: make sure this is a shift
+            pix_idx = _mm256_add_epi32(pix_idx, _mm256_set1_epi32(8));
         }
+        pix_idx_rowstart = _mm256_add_epi32(pix_idx_rowstart, vwidth);
     }
     hist
+}
+
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+))]
+unsafe fn normalize_hist_avx2(hist: &mut [f32], out: &mut [u8]) {
+    use std::arch::x86_64::*;
+    assert!(hist.len() % 8 == 0);
+
+    // Single component cap computed from L2 norm
+    let mut acc = _mm256_setzero_ps();
+    for i in (0..hist.len()).step_by(8) {
+        let val = _mm256_loadu_ps(&hist[i]);
+        acc = _mm256_fmadd_ps(val, val, acc);
+    }
+    let lo = _mm256_castps256_ps128(acc);
+    let hi = _mm256_extractf128_ps::<1>(acc);
+    let red = _mm_add_ps(lo, hi);
+    let red = _mm_hadd_ps(red, red);
+    let red = _mm_hadd_ps(red, red);
+    let l2norm = _mm_mul_ps(_mm_rsqrt_ss(red), red);
+    let component_cap = _mm_mul_ps(
+        _mm_broadcastss_ps(l2norm),
+        _mm_set1_ps(DESCRIPTOR_MAGNITUDE_CAP),
+    );
+    let component_cap =
+        _mm256_castsi256_ps(_mm256_broadcastsi128_si256(_mm_castps_si128(component_cap)));
+    // cap each component to component_cap
+    for i in (0..hist.len()).step_by(8) {
+        let val = _mm256_loadu_ps(&hist[i]);
+        let gt_cap = _mm256_cmp_ps::<_CMP_GT_OQ>(val, component_cap);
+        let capped = _mm256_blendv_ps(val, component_cap, gt_cap);
+        _mm256_storeu_ps(hist.as_mut_ptr().add(i), capped);
+    }
+    // normalize l2 norm to DESCRIPTOR_L2_NORM
+    let mut acc = _mm256_setzero_ps();
+    for i in (0..hist.len()).step_by(8) {
+        let val = _mm256_loadu_ps(&hist[i]);
+        acc = _mm256_fmadd_ps(val, val, acc);
+    }
+    let lo = _mm256_castps256_ps128(acc);
+    let hi = _mm256_extractf128_ps::<1>(acc);
+    let red = _mm_add_ps(lo, hi);
+    let red = _mm_hadd_ps(red, red);
+    let red = _mm_hadd_ps(red, red);
+    let rsqrt = _mm_rsqrt_ss(red);
+    let rsqrt = _mm256_castsi256_ps(_mm256_broadcastsi128_si256(_mm_castps_si128(
+        _mm_broadcastss_ps(rsqrt),
+    )));
+    let norm = _mm256_mul_ps(rsqrt, _mm256_set1_ps(DESCRIPTOR_L2_NORM));
+    // saturating cast to u8
+    for i in (0..hist.len()).step_by(8) {
+        let val = _mm256_loadu_ps(&hist[i]);
+        let valnorm = _mm256_mul_ps(val, norm);
+        let valnorm = _mm256_cvtps_epi32(_mm256_round_ps::<_MM_FROUND_TO_NEAREST_INT>(valnorm));
+        let gt_255 = _mm256_castsi256_ps(_mm256_cmpgt_epi32(valnorm, _mm256_set1_epi32(255)));
+        let sat = _mm256_castps_si256(_mm256_blendv_ps(
+            _mm256_castsi256_ps(valnorm),
+            _mm256_castsi256_ps(_mm256_set1_epi32(255)),
+            gt_255,
+        ));
+        // pack lowest byte of each f32 in sat into 8 bytes
+        let shuf = _mm256_set_epi8(
+            -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 12, 8, 4, 0, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, 12, 8, 4, 0,
+        );
+
+        let shuffled = _mm256_shuffle_epi8(sat, shuf);
+        let packed =
+            _mm256_permutevar8x32_epi32(shuffled, _mm256_set_epi32(-1, -1, -1, -1, -1, -1, 4, 0));
+
+        let store_mask = _mm256_set_epi64x(0, 0, 0, i64::MIN);
+        _mm256_maskstore_epi64(out.as_mut_ptr().add(i) as *mut i64, store_mask, packed);
+    }
 }
 
 /// SAFETY: alignment 32, all same length, length divisible by 8, called if avx2 avail
@@ -548,21 +624,9 @@ unsafe fn histogram_avx2(
             let idx = _mm256_add_epi32(_mm256_add_epi32(idx_base, index_offsets), ori_idx_offset);
             let idx = {
                 let mut v = [0_i32; 8];
-                _mm256_storeu_si256(transmute::<*mut i32, *mut __m256i>(v.as_mut_ptr()), idx);
+                _mm256_storeu_si256(v.as_mut_ptr() as *mut __m256i, idx);
                 v
             };
-            //println!("{idx:?}");
-            //println!(
-            //    "{}, {}, {}, {}, {}, {}, {}, {}",
-            //    buf000[j],
-            //    buf000[j],
-            //    buf010[j],
-            //    buf011[j],
-            //    buf100[j],
-            //    buf101[j],
-            //    buf110[j],
-            //    buf111[j],
-            //);
             hist[idx[0] as usize] += buf000[j];
             hist[idx[1] as usize] += buf001[j];
             hist[idx[2] as usize] += buf010[j];

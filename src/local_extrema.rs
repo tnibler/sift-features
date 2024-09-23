@@ -135,7 +135,7 @@ unsafe fn local_extrema_avx2(
     let ny = arr.shape()[1];
     let nz = arr.shape()[0];
     assert!(nz == 3);
-    let mut scratch = vec![false; 4 * 1024];
+    let mut scratch = vec![false; 2 * 1024];
     // a <= 0: a <= b => a - b <= 0
     // a >= 0: a >= b => a - b >= 0
     // a-b, shr 31,  not mask with sign bit
@@ -149,7 +149,7 @@ unsafe fn local_extrema_avx2(
     let mut buf_idx: usize = 0;
     let mut buf_start: usize = (nx as usize * border) + border;
     let vvalue_threshold = _mm256_set1_ps(value_threshold);
-    let sign_bit_mask: __m256 = std::mem::transmute(_mm256_set1_epi32(i32::MAX));
+    let sign_bit_mask = _mm256_castsi256_ps(_mm256_set1_epi32(i32::MAX));
     unsafe {
         for y in (border as isize)..(ny - border as isize) {
             let mut x = border as isize;
@@ -193,19 +193,19 @@ unsafe fn local_extrema_avx2(
                 let lt_thresh = _mm256_cmp_ps::<_CMP_LT_OQ>(abs, vvalue_threshold);
                 // MSB/sign bit is 0 iff val >= x forall x around val
                 // Initialized to lt_thresh, so if abs(val) < threshold, MSB will always be set
-                let mut sign0: __m256i = std::mem::transmute(lt_thresh);
+                let mut sign0 = _mm256_castps_si256(lt_thresh);
                 // MSB/sign bit is 1 iff val <= x forall x around val
                 let mut sign1: __m256i = _mm256_set1_epi32(-1);
                 macro_rules! do_sub {
                     ($p:expr, $offset:expr) => {
                         let other = _mm256_loadu_ps($p.offset($offset));
                         let sub = _mm256_sub_ps(val, other);
-                        let sub: __m256i = std::mem::transmute::<__m256, __m256i>(sub);
+                        let sub = _mm256_castps_si256(sub);
                         let eqzero = _mm256_cmp_ps::<_CMP_EQ_OQ>(val, other);
                         // if sign bit of sub is not set and sub != 0, sign1 MSB will never go back
                         // to 1 and we know val is not >= x forall x around val
                         sign1 = _mm256_and_si256(
-                            _mm256_or_si256(sub, std::mem::transmute::<__m256, __m256i>(eqzero)),
+                            _mm256_or_si256(sub, _mm256_castps_si256(eqzero)),
                             sign1,
                         );
                         // if sign bit of sub is set, sign0 MSB will never go back to 0 and we know
@@ -246,18 +246,12 @@ unsafe fn local_extrema_avx2(
                 // sign0 MSB is 0 iff val >= other forall other
                 // sign1 and val: MSB 1 if val < 0 and val <= other => extremum
                 // not(sign0 or val): MSB 1 if val > 0 and val >= other => extremum
-                let vali: __m256i = std::mem::transmute(val);
+                let vali = _mm256_castps_si256(val);
                 let neg_and_smaller = _mm256_and_si256(sign1, vali);
-                let msb_one =
-                    std::mem::transmute::<__m256i, __m256>(_mm256_set1_epi32(-0x80000000));
-                let pos_and_larger = _mm256_xor_ps(
-                    _mm256_or_ps(std::mem::transmute::<__m256i, __m256>(sign0), val),
-                    msb_one,
-                );
-                let mask: __m256i = std::mem::transmute(_mm256_or_si256(
-                    neg_and_smaller,
-                    std::mem::transmute::<_, __m256i>(pos_and_larger),
-                ));
+                let msb_one = _mm256_castsi256_ps(_mm256_set1_epi32(-0x80000000));
+                let pos_and_larger =
+                    _mm256_xor_ps(_mm256_or_ps(_mm256_castsi256_ps(sign0), val), msb_one);
+                let mask = _mm256_or_si256(neg_and_smaller, _mm256_castps_si256(pos_and_larger));
                 let mask = _mm256_srli_epi32(mask, 31);
 
                 let shuf = _mm256_set_epi8(
