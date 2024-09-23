@@ -1,7 +1,9 @@
-use ndarray::{Array3, ArrayView3};
+use ndarray::ArrayView3;
 
-use crate::{discard_or_interpolate_extremum, RetainedExtremum, ScaleSpacePoint, SiftKeyPoint};
+use crate::{discard_or_interpolate_extremum, RetainedExtremum, ScaleSpacePoint};
 
+/// Finds extrema in `dogslice[1, :, :] i.e, values which are less or greater than`all their 26
+/// neighbors in the 3D DoG.
 pub fn local_extrema(
     dogslice: &ArrayView3<f32>,
     border: usize,
@@ -14,113 +16,117 @@ pub fn local_extrema(
     assert!(2 * border <= dogslice.shape()[2]);
     let nz = dogslice.shape()[0];
     assert!(nz == 3);
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
     {
-        //if std::arch::is_x86_feature_detected!("avx2") {
         return unsafe { local_extrema_avx2(dogslice, border, value_threshold, scale, dog) };
-        //}
     }
-    //local_extrema_fallback(
-    //    arr,
-    //    border,
-    //    value_threshold,
-    //    discard_or_process,
-    //    caller_data,
-    //)
+    local_extrema_fallback(dogslice, border, value_threshold, scale, dog)
 }
 
-//pub fn local_extrema_fallback<T, CallerData: Copy>(
-//    arr: &ArrayView3<f32>,
-//    border: usize,
-//    threshold: f32,
-//    discard_or_process: impl Fn(usize, usize, CallerData, &mut Vec<T>),
-//    caller_data: (&ArrayView3<f32>, &[Array3<f32>], usize, usize),
-//) -> Vec<T> {
-//    assert!(border >= 1);
-//    assert!(2 * border <= arr.shape()[1]);
-//    assert!(2 * border <= arr.shape()[2]);
-//
-//    let nz = arr.shape()[0];
-//    assert!(nz == 3);
-//    let ny = arr.shape()[1];
-//    let nx = arr.shape()[2];
-//
-//    // Little bit of a dance to eliminate bounds checks and generate nice code
-//    let sl = arr.as_slice().expect("should be contiguous");
-//    let (p0, sl) = sl.split_at(nx * ny);
-//    let (p1, p2) = sl.split_at(nx * ny);
-//    let mut extrema = Vec::default();
-//
-//    for y in border..(ny - border) {
-//        for x in border..(nx - border) {
-//            let val = p1[(y) * nx + x];
-//            if val.abs() <= threshold {
-//                continue;
-//            }
-//            let c = if val >= 0. {
-//                val >= p1[(y) * nx + x - 1]
-//                    && val >= p1[(y) * nx + x + 1]
-//                    && val >= p1[(y + 1) * nx + x + 1]
-//                    && val >= p1[(y + 1) * nx + x]
-//                    && val >= p1[(y + 1) * nx + x - 1]
-//                    && val >= p1[(y - 1) * nx + x + 1]
-//                    && val >= p1[(y - 1) * nx + x]
-//                    && val >= p1[(y - 1) * nx + x - 1]
-//                    && val >= p0[(y) * nx + x - 1]
-//                    && val >= p0[(y) * nx + x]
-//                    && val >= p0[(y) * nx + x + 1]
-//                    && val >= p0[(y + 1) * nx + x + 1]
-//                    && val >= p0[(y + 1) * nx + x]
-//                    && val >= p0[(y + 1) * nx + x - 1]
-//                    && val >= p0[(y - 1) * nx + x + 1]
-//                    && val >= p0[(y - 1) * nx + x]
-//                    && val >= p0[(y - 1) * nx + x - 1]
-//                    && val >= p2[(y) * nx + x - 1]
-//                    && val >= p2[(y) * nx + x]
-//                    && val >= p2[(y) * nx + x + 1]
-//                    && val >= p2[(y + 1) * nx + x + 1]
-//                    && val >= p2[(y + 1) * nx + x]
-//                    && val >= p2[(y + 1) * nx + x - 1]
-//                    && val >= p2[(y - 1) * nx + x + 1]
-//                    && val >= p2[(y - 1) * nx + x]
-//                    && val >= p2[(y - 1) * nx + x - 1]
-//            } else {
-//                val <= p1[(y) * nx + x - 1]
-//                    && val <= p1[(y) * nx + x + 1]
-//                    && val <= p1[(y + 1) * nx + x + 1]
-//                    && val <= p1[(y + 1) * nx + x]
-//                    && val <= p1[(y + 1) * nx + x - 1]
-//                    && val <= p1[(y - 1) * nx + x + 1]
-//                    && val <= p1[(y - 1) * nx + x]
-//                    && val <= p1[(y - 1) * nx + x - 1]
-//                    && val <= p0[(y) * nx + x - 1]
-//                    && val <= p0[(y) * nx + x]
-//                    && val <= p0[(y) * nx + x + 1]
-//                    && val <= p0[(y + 1) * nx + x + 1]
-//                    && val <= p0[(y + 1) * nx + x]
-//                    && val <= p0[(y + 1) * nx + x - 1]
-//                    && val <= p0[(y - 1) * nx + x + 1]
-//                    && val <= p0[(y - 1) * nx + x]
-//                    && val <= p0[(y - 1) * nx + x - 1]
-//                    && val <= p2[(y) * nx + x - 1]
-//                    && val <= p2[(y) * nx + x]
-//                    && val <= p2[(y) * nx + x + 1]
-//                    && val <= p2[(y + 1) * nx + x + 1]
-//                    && val <= p2[(y + 1) * nx + x]
-//                    && val <= p2[(y + 1) * nx + x - 1]
-//                    && val <= p2[(y - 1) * nx + x + 1]
-//                    && val <= p2[(y - 1) * nx + x]
-//                    && val <= p2[(y - 1) * nx + x - 1]
-//            };
-//            if c {
-//                discard_or_process(x, y, caller_data, &mut extrema);
-//            }
-//        }
-//    }
-//    extrema
-//}
-//
-#[target_feature(enable = "avx2")]
+fn local_extrema_fallback(
+    arr: &ArrayView3<f32>,
+    border: usize,
+    value_threshold: f32,
+    scale: usize,
+    dog: &ArrayView3<f32>,
+) -> Vec<RetainedExtremum> {
+    assert!(border >= 1);
+    assert!(2 * border <= arr.shape()[1]);
+    assert!(2 * border <= arr.shape()[2]);
+
+    let nz = arr.shape()[0];
+    assert!(nz == 3);
+    let ny = arr.shape()[1];
+    let nx = arr.shape()[2];
+
+    // Little bit of a dance to eliminate bounds checks and generate nice code
+    let sl = arr.as_slice().expect("should be contiguous");
+    let (p0, sl) = sl.split_at(nx * ny);
+    let (p1, p2) = sl.split_at(nx * ny);
+    let mut extrema = Vec::default();
+
+    for y in border..(ny - border) {
+        for x in border..(nx - border) {
+            let val = p1[(y) * nx + x];
+            if val.abs() <= value_threshold {
+                continue;
+            }
+            let c = if val >= 0. {
+                val >= p1[(y) * nx + x - 1]
+                    && val >= p1[(y) * nx + x + 1]
+                    && val >= p1[(y + 1) * nx + x + 1]
+                    && val >= p1[(y + 1) * nx + x]
+                    && val >= p1[(y + 1) * nx + x - 1]
+                    && val >= p1[(y - 1) * nx + x + 1]
+                    && val >= p1[(y - 1) * nx + x]
+                    && val >= p1[(y - 1) * nx + x - 1]
+                    && val >= p0[(y) * nx + x - 1]
+                    && val >= p0[(y) * nx + x]
+                    && val >= p0[(y) * nx + x + 1]
+                    && val >= p0[(y + 1) * nx + x + 1]
+                    && val >= p0[(y + 1) * nx + x]
+                    && val >= p0[(y + 1) * nx + x - 1]
+                    && val >= p0[(y - 1) * nx + x + 1]
+                    && val >= p0[(y - 1) * nx + x]
+                    && val >= p0[(y - 1) * nx + x - 1]
+                    && val >= p2[(y) * nx + x - 1]
+                    && val >= p2[(y) * nx + x]
+                    && val >= p2[(y) * nx + x + 1]
+                    && val >= p2[(y + 1) * nx + x + 1]
+                    && val >= p2[(y + 1) * nx + x]
+                    && val >= p2[(y + 1) * nx + x - 1]
+                    && val >= p2[(y - 1) * nx + x + 1]
+                    && val >= p2[(y - 1) * nx + x]
+                    && val >= p2[(y - 1) * nx + x - 1]
+            } else {
+                val <= p1[(y) * nx + x - 1]
+                    && val <= p1[(y) * nx + x + 1]
+                    && val <= p1[(y + 1) * nx + x + 1]
+                    && val <= p1[(y + 1) * nx + x]
+                    && val <= p1[(y + 1) * nx + x - 1]
+                    && val <= p1[(y - 1) * nx + x + 1]
+                    && val <= p1[(y - 1) * nx + x]
+                    && val <= p1[(y - 1) * nx + x - 1]
+                    && val <= p0[(y) * nx + x - 1]
+                    && val <= p0[(y) * nx + x]
+                    && val <= p0[(y) * nx + x + 1]
+                    && val <= p0[(y + 1) * nx + x + 1]
+                    && val <= p0[(y + 1) * nx + x]
+                    && val <= p0[(y + 1) * nx + x - 1]
+                    && val <= p0[(y - 1) * nx + x + 1]
+                    && val <= p0[(y - 1) * nx + x]
+                    && val <= p0[(y - 1) * nx + x - 1]
+                    && val <= p2[(y) * nx + x - 1]
+                    && val <= p2[(y) * nx + x]
+                    && val <= p2[(y) * nx + x + 1]
+                    && val <= p2[(y + 1) * nx + x + 1]
+                    && val <= p2[(y + 1) * nx + x]
+                    && val <= p2[(y + 1) * nx + x - 1]
+                    && val <= p2[(y - 1) * nx + x + 1]
+                    && val <= p2[(y - 1) * nx + x]
+                    && val <= p2[(y - 1) * nx + x - 1]
+            };
+            if c {
+                if let Some(res) =
+                    discard_or_interpolate_extremum(ScaleSpacePoint { scale, x, y }, arr, dog)
+                {
+                    extrema.push(res);
+                }
+            }
+        }
+    }
+    extrema
+}
+
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+))]
 unsafe fn local_extrema_avx2(
     arr: &ArrayView3<f32>,
     border: usize,
@@ -168,7 +174,7 @@ unsafe fn local_extrema_avx2(
                         .for_each(|(idx, extr)| {
                             if *extr {
                                 let ey = (buf_start + idx) / (nx as usize);
-                                let ex = (buf_start + idx) % nx as usize; // TODO: replace modulo
+                                let ex = (buf_start + idx) - (nx as usize * ey);
                                 if let Some(res) = discard_or_interpolate_extremum(
                                     ScaleSpacePoint {
                                         scale,
@@ -254,6 +260,7 @@ unsafe fn local_extrema_avx2(
                 let mask = _mm256_or_si256(neg_and_smaller, _mm256_castps_si256(pos_and_larger));
                 let mask = _mm256_srli_epi32(mask, 31);
 
+                // pack lowest byte of every f32 in mask into 8 bytes
                 let shuf = _mm256_set_epi8(
                     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 12, 8, 4, 0, -1, -1, -1, -1,
                     -1, -1, -1, -1, -1, -1, -1, -1, 12, 8, 4, 0,

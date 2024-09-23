@@ -29,29 +29,10 @@ use core::f32;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::__m256;
 
-use aligned_vec::{avec, AVec, ConstAlign};
-
-/// Fast exp approximation.
-///
-/// # Panics
-///
-/// If start of `xs` is not aligned to 32-bytes
-pub fn exp(mut xs_aligned: AVec<f32, ConstAlign<32>>) -> AVec<f32, ConstAlign<32>> {
+pub fn exp_inplace(xs: &mut [f32]) {
     const ALIGN: usize = 32;
-    assert_eq!(xs_aligned.as_ptr() as usize % ALIGN, 0);
-    let tail = if is_x86_feature_detected!("avx2") {
-        let tail = xs_aligned.len() - (xs_aligned.len() % 8);
-        unsafe {
-            exp_arr_avx2(&mut xs_aligned[..tail]);
-        }
-        tail
-    } else {
-        0
-    };
-    xs_aligned[tail..]
-        .iter_mut()
-        .for_each(|v| *v = exp_single(*v));
-    xs_aligned
+    assert_eq!(xs.as_ptr() as usize % ALIGN, 0);
+    xs.iter_mut().for_each(|v| *v = exp_single(*v));
 }
 
 const EXP_HI: f32 = 88.37626;
@@ -63,6 +44,7 @@ const P3: f32 = 4.1665795E-2;
 const P4: f32 = 0.16666665;
 const P5: f32 = 0.5;
 
+#[inline(always)]
 fn exp_single(x: f32) -> f32 {
     let x = x.clamp(EXP_LO, EXP_HI);
     let fx = (x * f32::consts::LOG2_E).round();
@@ -70,25 +52,16 @@ fn exp_single(x: f32) -> f32 {
     let x = x - z;
     let z = x * x;
     let y = (((((P0 * x + P1) * x + P2) * x + P3) * x + P4) * x + P5) * z + x + 1.;
-    // 2_f32.powf(fx);
     let fx = (fx as i32 + 127) << 23;
     y * f32::from_bits(fx as u32)
 }
 
-#[target_feature(enable = "avx2")]
-unsafe fn exp_arr_avx2(xs: &mut [f32]) {
-    use std::arch::x86_64::*;
-
-    for i in (0..xs.len()).step_by(8) {
-        let ptr = xs.as_mut_ptr().add(i);
-        let x = _mm256_load_ps(ptr);
-        _mm256_store_ps(ptr, exp_avx2(x));
-    }
-}
-
-#[target_feature(enable = "fma")]
-#[target_feature(enable = "avx2")]
-#[inline]
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+))]
+#[inline(always)]
 pub unsafe fn exp_avx2(x: __m256) -> __m256 {
     use std::arch::x86_64::*;
     let log2e = _mm256_set1_ps(f32::consts::LOG2_E);
@@ -125,19 +98,6 @@ pub unsafe fn exp_avx2(x: __m256) -> __m256 {
     let imm0 = _mm256_add_epi32(imm0, _mm256_set1_epi32(0x7f));
     let imm0 = _mm256_slli_epi32(imm0, 23);
     let pow2n = _mm256_castsi256_ps(imm0);
-    let y = _mm256_mul_ps(y, pow2n);
-    y
-}
 
-#[test]
-fn fast_exp_accurate() {
-    let values: AVec<f32, ConstAlign<32>> =
-        AVec::from_iter(32, (0..1024).map(|i| (i as f32 * 0.21) - 50.));
-    let exps = exp(values.clone());
-    println!("{exps:?}");
-    for (v, e) in values.iter().zip(exps.iter()) {
-        let expected = v.exp();
-        let err = (expected - e).abs();
-        assert!(err < 1e-3, "exp({v})={e}, actual {expected}, error={err}");
-    }
+    _mm256_mul_ps(y, pow2n)
 }

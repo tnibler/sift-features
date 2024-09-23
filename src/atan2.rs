@@ -15,11 +15,10 @@
 // WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 // ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
 use core::f32;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::__m256;
-
-use aligned_vec::{avec, AVec, ConstAlign};
 
 const A1: f32 = 0.99997726;
 const A3: f32 = -0.33262347;
@@ -35,35 +34,17 @@ const A11: f32 = -0.0117212;
 /// - if start of `xs` and `ys` is not aligned to 32-bytes
 /// - if `xs` and `ys` are not the same length
 /// - if the input includes the point (0., 0.).
-pub fn atan2(
-    mut xs_aligned: AVec<f32, ConstAlign<32>>,
-    ys_aligned: &[f32],
-) -> AVec<f32, ConstAlign<32>> {
-    assert_eq!(xs_aligned.len(), ys_aligned.len());
-    assert_eq!(ys_aligned.as_ptr() as usize % 32, 0);
+pub fn atan2_inplace(xs_out: &mut [f32], ys: &[f32]) {
+    assert_eq!(xs_out.len(), ys.len());
+    assert_eq!(ys.as_ptr() as usize % 32, 0);
 
-    let tail: usize = 0;
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx2",
-        target_feature = "fma"
-    ))]
-    let tail = if is_x86_feature_detected!("avx2") {
-        let tail = xs_aligned.len() - (xs_aligned.len() % 8);
-        unsafe {
-            atan2_arr_avx2(&mut xs_aligned[..tail], &ys_aligned[..tail]);
-        }
-        tail
-    } else {
-        0
-    };
-    xs_aligned[tail..]
+    xs_out
         .iter_mut()
-        .zip(ys_aligned[tail..].iter().copied())
+        .zip(ys.iter().copied())
         .for_each(|(x, y)| *x = atan2_single(*x, y));
-    xs_aligned
 }
 
+#[inline(always)]
 fn atan2_single(x: f32, y: f32) -> f32 {
     assert!(x != 0. || y != 0.);
     let swap = x.abs() < y.abs();
@@ -79,21 +60,6 @@ fn atan2_single(x: f32, y: f32) -> f32 {
         f32::consts::PI.copysign(y) + res
     } else {
         res
-    }
-}
-
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    target_feature = "fma"
-))]
-unsafe fn atan2_arr_avx2(xs_out: &mut [f32], ys: &[f32]) {
-    use std::arch::x86_64::*;
-
-    for i in (0..xs_out.len()).step_by(8) {
-        let y = _mm256_load_ps(&ys[i]);
-        let x = _mm256_load_ps(&xs_out[i]);
-        _mm256_store_ps(xs_out.as_mut_ptr().add(i), atan2_avx2(x, y));
     }
 }
 
@@ -141,6 +107,6 @@ pub unsafe fn atan2_avx2(x: __m256, y: __m256) -> __m256 {
         _mm256_xor_ps(result, _mm256_and_ps(x, sign_mask)),
         _mm256_and_ps(pi, x_sign_mask),
     );
-    let result = _mm256_xor_ps(result, _mm256_and_ps(y, sign_mask));
-    result
+
+    _mm256_xor_ps(result, _mm256_and_ps(y, sign_mask))
 }

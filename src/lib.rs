@@ -28,7 +28,7 @@ use image::buffer::ConvertBuffer;
 use image::imageops::{resize, FilterType};
 use image::{GrayImage, ImageBuffer, Luma};
 use imageproc::filter::gaussian_blur_f32;
-use itertools::{izip, Itertools};
+use itertools::{izip, Itertools as _};
 use ndarray::{prelude::*, s, Array2, Array3, Axis};
 use nshare::AsNdarray2;
 
@@ -171,7 +171,18 @@ pub fn sift_with_precomputed(
     }: &PrecomputedImages,
     features_limit: Option<usize>,
 ) -> SiftResult {
-    let mut keypoints: Vec<SiftKeyPoint> = find_keypoints(*n_octaves, scale_space, dog).collect();
+    assert_eq!(scale_space.len(), *n_octaves);
+    let mut keypoints: Vec<SiftKeyPoint> = {
+        let n_octaves = *n_octaves;
+        (0..n_octaves).flat_map(move |octave| {
+            let dog = &dog[octave];
+            assert!(dog.shape()[0] == SCALES_PER_OCTAVE + 2);
+            (1..=SCALES_PER_OCTAVE).flat_map(move |scale_in_octave| {
+                find_keypoints_in_dog_img(dog, scale_space, octave, scale_in_octave)
+            })
+        })
+    }
+    .collect();
     if let Some(limit) = features_limit {
         if limit < keypoints.len() {
             keypoints.sort_unstable_by(|kp1, kp2| kp2.response.total_cmp(&kp1.response));
@@ -216,7 +227,6 @@ fn create_seed_image<P: Processing>(img: &GrayImage) -> ImageBuffer<Luma<f32>, V
     // float image with pixel values [0; 1];
     let img_f32: LumaFImage = img.convert();
     // Initial upsampling step by DELTA_MIN
-    // OpenCV doesn't use their normal resize function but instead `warpAffine` to upscale 2x. Why?
     let img_2x = P::resize_linear(
         &img_f32,
         img_f32.width() * INV_DELTA_MIN,
@@ -297,38 +307,10 @@ fn build_dog(n_octaves: usize, scale_space: &[Array3<f32>]) -> Vec<Array3<f32>> 
     dog
 }
 
-fn find_keypoints<'a>(
-    n_octaves: usize,
-    scale_space: &'a [Array3<f32>],
-    dogs: &'a [Array3<f32>],
-) -> impl Iterator<Item = SiftKeyPoint> + 'a {
-    assert!(scale_space.len() == n_octaves);
-    //let mut v = Vec::default();
-    //for octave in 0..n_octaves {
-    //    let dog = &dogs[octave];
-    //    for scale_in_octave in 1..=SCALES_PER_OCTAVE {
-    //        v.extend(find_extrema_in_dog_img(
-    //            dog,
-    //            scale_space,
-    //            octave,
-    //            scale_in_octave,
-    //        ));
-    //    }
-    //}
-    //v.into_iter()
-    (0..n_octaves).flat_map(move |octave| {
-        let dog = &dogs[octave];
-        assert!(dog.shape()[0] == SCALES_PER_OCTAVE + 2);
-        (1..=SCALES_PER_OCTAVE).flat_map(move |scale_in_octave| {
-            find_extrema_in_dog_img(dog, scale_space, octave, scale_in_octave)
-        })
-    })
-}
-
 /// t in Section 4.1.C
 const ORIENTATION_HISTOGRAM_LOCALMAX_RATIO: f32 = 0.8;
 
-fn find_extrema_in_dog_img<'a>(
+fn find_keypoints_in_dog_img<'a>(
     dog: &'a Array3<f32>,
     scale_space: &'a [Array3<f32>],
     octave: usize,
@@ -432,7 +414,7 @@ fn keypoints_from_extremum(
     // Side length of patch over which gradient orientation histogram is computed.
     // See Eq. (19) in [4]
     let radius: i32 = (3. * ORIENTATION_HISTOGRAM_RADIUS * kp_scale).round() as i32;
-    let hist = gradient_direction_histogram(
+    let hist = gradient_orientation_histogram(
         scale_space[octave].slice(s![point.scale, .., ..]),
         point.x as u32,
         point.y as u32,
@@ -650,9 +632,9 @@ fn extremum_is_on_edge(
     }
 }
 
-/// Histogram of gradient directions in square patch of side length 2*radius around (row, col).
+/// Histogram of gradient orientations in square patch of side length 2*radius around (row, col).
 /// See Section 4.1 in [4].
-fn gradient_direction_histogram(
+fn gradient_orientation_histogram(
     img: ArrayView2<f32>,
     x: u32,
     y: u32,
@@ -664,15 +646,12 @@ fn gradient_direction_histogram(
     // Denominator of exponent in Eq. (20) in [4], used to compute weights
     let grad_weight_scale = -1.0 / (2.0 * sigma * sigma);
 
-    const ALIGN: usize = 32;
-    type AlignVec = AVec<f32, ConstAlign<ALIGN>>;
-
     // x/y gradients are weighted by their distance from the point at (row, col).
     // grad_weights holds the exponent of the weighting factor in Eq. (20) in [4]
 
-    let mut grads_x: AVec<f32, _> = avec!([ALIGN]| 0.; ((2 * radius + 1).pow(2)) as usize);
-    let mut grads_y: AVec<f32, _> = avec!([ALIGN]| 0.; ((2 * radius + 1).pow(2)) as usize);
-    let mut grad_weights: AVec<f32, _> = avec!([ALIGN]| 0.; ((2 * radius + 1).pow(2)) as usize);
+    let mut grads_x: AVec<f32, _> = avec!([32]| 0.; ((2 * radius + 1).pow(2)) as usize);
+    let mut grads_y: AVec<f32, _> = avec!([32]| 0.; ((2 * radius + 1).pow(2)) as usize);
+    let mut grad_weights: AVec<f32, _> = avec!([32]| 0.; ((2 * radius + 1).pow(2)) as usize);
     let mut len: usize = 0;
     for y_patch in -radius..(radius + 1) {
         if y_patch <= -(y as i32) {
@@ -713,29 +692,9 @@ fn gradient_direction_histogram(
     let grads_y = grads_y;
     let grad_weights = grad_weights;
 
-    // Range of angles (radians) assigned to one histogram bin
-    let bin_angle_step = n_bins as f32 / (PI32 * 2.);
     let mut raw_hist = vec![0.0; n_bins + 4];
+    build_orientation_histogram(grads_x, grads_y, grad_weights, n_bins, &mut raw_hist);
 
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx2",
-        target_feature = "fma"
-    ))]
-    {
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                orihist(
-                    &grads_x,
-                    &grads_y,
-                    &grad_weights,
-                    n_bins,
-                    bin_angle_step,
-                    &mut raw_hist,
-                );
-            }
-        }
-    }
     // The gradient orientation histogram undergoes a final smoothing step.
     // In [4], smoothing is done by convolving 6 times with a kernel of [1/3, 1/3, 1/3].
     // In OpenCV, the kernel [1/16, 4/16, 6/16, 4/16, 1/16] is instead used one time only.
@@ -754,13 +713,89 @@ fn gradient_direction_histogram(
     hist
 }
 
+#[inline(always)]
+fn build_orientation_histogram(
+    mut grads_x: AVec<f32, ConstAlign<32>>,
+    grads_y: AVec<f32, ConstAlign<32>>,
+    mut grad_weights: AVec<f32, ConstAlign<32>>,
+    n_bins: usize,
+    raw_hist: &mut [f32],
+) {
+    assert_eq!(raw_hist.len(), n_bins + 4);
+    // Range of angles (radians) assigned to one histogram bin
+    let bin_angle_step = n_bins as f32 / (PI32 * 2.);
+
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe {
+                gradient_orientation_hist_avx2(
+                    &grads_x,
+                    &grads_y,
+                    &grad_weights,
+                    n_bins,
+                    bin_angle_step,
+                    raw_hist,
+                );
+            };
+        }
+    }
+    // Fallback scalar implementation
+
+    // Finalizing the term in Eq. (20) in [4]
+    exp::exp_inplace(&mut grad_weights);
+
+    // gradient magnitudes
+    let magnitudes: AVec<f32, ConstAlign<32>> = AVec::from_iter(
+        32,
+        grads_x
+            .iter()
+            .zip(grads_y.iter())
+            .map(|(x, y)| (x * x + y * y).sqrt()),
+    );
+
+    let orientations = {
+        atan2::atan2_inplace(&mut grads_x, &grads_y);
+        grads_x
+    };
+
+    // Range of angles (radians) assigned to one histogram bin
+    let bin_angle_step = n_bins as f32 / (PI32 * 2.);
+    // Histogram bin index as given by Eq. (21) in [4]
+    let hist_bin = orientations.iter().map(|ori| {
+        debug_assert!((-PI32..=PI32).contains(ori));
+        let raw_bin = bin_angle_step * ori;
+        // raw_bin is in range [-PI * (n_bins / 2PI); PI * (n_bins / 2PI)]
+        //                    =[-n_bins / 2; n_bins / 2];
+        debug_assert!(-(n_bins as f32) / 2. <= raw_bin && raw_bin <= n_bins as f32 / 2.);
+        let bin: i32 = raw_bin.round() as i32;
+        if bin >= n_bins as i32 {
+            (bin - n_bins as i32) as usize
+        } else if bin < 0 {
+            assert!(bin + n_bins as i32 >= 0);
+            (bin + n_bins as i32) as usize
+        } else {
+            bin as usize
+        }
+    });
+
+    // See last step in `gradient_orienation_histogram` for reason for the + 2 here.
+    izip!(hist_bin, magnitudes.iter(), grad_weights.iter()).for_each(|(bin, mag, weight)| {
+        raw_hist[bin + 2] += weight * mag;
+    });
+}
+
 #[cfg(all(
     target_arch = "x86_64",
     target_feature = "avx2",
     target_feature = "fma"
 ))]
-#[inline]
-unsafe fn orihist(
+#[inline(always)]
+unsafe fn gradient_orientation_hist_avx2(
     grads_x: &[f32],
     grads_y: &[f32],
     grad_weights: &[f32],
