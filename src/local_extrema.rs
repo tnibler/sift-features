@@ -196,69 +196,82 @@ unsafe fn local_extrema_avx2(
 
                 // zero out sign bit to take absolute value
                 let abs = _mm256_and_ps(val, sign_bit_mask);
-                let lt_thresh = _mm256_cmp_ps::<_CMP_LT_OQ>(abs, vvalue_threshold);
-                // MSB/sign bit is 0 iff val >= x forall x around val
-                // Initialized to lt_thresh, so if abs(val) < threshold, MSB will always be set
-                let mut sign0 = _mm256_castps_si256(lt_thresh);
-                // MSB/sign bit is 1 iff val <= x forall x around val
-                let mut sign1: __m256i = _mm256_set1_epi32(-1);
-                macro_rules! do_sub {
-                    ($p:expr, $offset:expr) => {
-                        let other = _mm256_loadu_ps($p.offset($offset));
-                        let sub = _mm256_sub_ps(val, other);
-                        let sub = _mm256_castps_si256(sub);
-                        let eqzero = _mm256_cmp_ps::<_CMP_EQ_OQ>(val, other);
-                        // if sign bit of sub is not set and sub != 0, sign1 MSB will never go back
-                        // to 1 and we know val is not >= x forall x around val
-                        sign1 = _mm256_and_si256(
-                            _mm256_or_si256(sub, _mm256_castps_si256(eqzero)),
-                            sign1,
-                        );
-                        // if sign bit of sub is set, sign0 MSB will never go back to 0 and we know
-                        // val is not <= x forall x around val
-                        sign0 = _mm256_or_si256(sign0, sub);
+                let gt_thresh = _mm256_cmp_ps::<_CMP_GT_OQ>(abs, vvalue_threshold);
+
+                macro_rules! mmax {
+                    ($a:expr, $b:expr) => {
+                        _mm256_max_ps($a, $b)
                     };
                 }
-                do_sub!(p1, y * nx + x - 1); // left
-                do_sub!(p1, y * nx + x + 1); // right
-                do_sub!(p1, (y - 1) * nx + x - 1); // above left
-                do_sub!(p1, (y - 1) * nx + x); // above
-                do_sub!(p1, (y - 1) * nx + x + 1); // above right
-                do_sub!(p1, (y + 1) * nx + x - 1); // below left
-                do_sub!(p1, (y + 1) * nx + x); // below
-                do_sub!(p1, (y + 1) * nx + x + 1); // below right
+                macro_rules! mmin {
+                    ($a:expr, $b:expr) => {
+                        _mm256_min_ps($a, $b)
+                    };
+                }
+                let v0 = _mm256_loadu_ps(p1.offset(y * nx + x - 1)); // left
+                let v1 = _mm256_loadu_ps(p1.offset(y * nx + x + 1)); // right
+                let v2 = _mm256_loadu_ps(p1.offset((y - 1) * nx + x - 1)); // above left
+                let v3 = _mm256_loadu_ps(p1.offset((y - 1) * nx + x)); // above
+                let v4 = _mm256_loadu_ps(p1.offset((y - 1) * nx + x + 1)); // above right
+                let v5 = _mm256_loadu_ps(p1.offset((y + 1) * nx + x - 1)); // below left
+                let v6 = _mm256_loadu_ps(p1.offset((y + 1) * nx + x)); // below
+                let v7 = _mm256_loadu_ps(p1.offset((y + 1) * nx + x + 1)); // below right
 
-                do_sub!(p0, y * nx + x - 1); // left
-                do_sub!(p0, y * nx + x);
-                do_sub!(p0, y * nx + x + 1); // right
-                do_sub!(p0, (y - 1) * nx + x - 1); // above left
-                do_sub!(p0, (y - 1) * nx + x); // above
-                do_sub!(p0, (y - 1) * nx + x + 1); // above right
-                do_sub!(p0, (y + 1) * nx + x - 1); // below left
-                do_sub!(p0, (y + 1) * nx + x); // below
-                do_sub!(p0, (y + 1) * nx + x + 1); // below right
+                // Tree shaped max computation to minimize dependencies between instructions
+                let vmax = mmax!(
+                    mmax!(mmax!(v0, v1), mmax!(v2, v3)),
+                    mmax!(mmax!(v4, v5), mmax!(v6, v7))
+                );
+                let vmin = mmin!(
+                    mmin!(mmin!(v0, v1), mmin!(v2, v3)),
+                    mmin!(mmin!(v4, v5), mmin!(v6, v7))
+                );
+                let le_all = _mm256_and_ps(gt_thresh, _mm256_cmp_ps::<_CMP_LE_OQ>(val, vmin));
+                let ge_all = _mm256_and_ps(gt_thresh, _mm256_cmp_ps::<_CMP_GE_OQ>(val, vmax));
 
-                do_sub!(p2, y * nx + x - 1); // left
-                do_sub!(p2, y * nx + x);
-                do_sub!(p2, y * nx + x + 1); // right
-                do_sub!(p2, (y - 1) * nx + x - 1); // above left
-                do_sub!(p2, (y - 1) * nx + x); // above
-                do_sub!(p2, (y - 1) * nx + x + 1); // above right
-                do_sub!(p2, (y + 1) * nx + x - 1); // below left
-                do_sub!(p2, (y + 1) * nx + x); // below
-                do_sub!(p2, (y + 1) * nx + x + 1); // below right
+                let v0 = _mm256_loadu_ps(p0.offset(y * nx + x - 1)); // left
+                let v1 = _mm256_loadu_ps(p0.offset(y * nx + x));
+                let v2 = _mm256_loadu_ps(p0.offset(y * nx + x + 1)); // right
+                let v3 = _mm256_loadu_ps(p0.offset((y - 1) * nx + x - 1)); // above left
+                let v4 = _mm256_loadu_ps(p0.offset((y - 1) * nx + x)); // above
+                let v5 = _mm256_loadu_ps(p0.offset((y - 1) * nx + x + 1)); // above right
+                let v6 = _mm256_loadu_ps(p0.offset((y + 1) * nx + x - 1)); // below left
+                let v7 = _mm256_loadu_ps(p0.offset((y + 1) * nx + x)); // below
+                let v8 = _mm256_loadu_ps(p0.offset((y + 1) * nx + x + 1)); // below right
 
-                // sign1 MSB is 1 iff val <= other forall other
-                // sign0 MSB is 0 iff val >= other forall other
-                // sign1 and val: MSB 1 if val < 0 and val <= other => extremum
-                // not(sign0 or val): MSB 1 if val > 0 and val >= other => extremum
-                let vali = _mm256_castps_si256(val);
-                let neg_and_smaller = _mm256_and_si256(sign1, vali);
-                let msb_one = _mm256_castsi256_ps(_mm256_set1_epi32(-0x80000000));
-                let pos_and_larger =
-                    _mm256_xor_ps(_mm256_or_ps(_mm256_castsi256_ps(sign0), val), msb_one);
-                let mask = _mm256_or_si256(neg_and_smaller, _mm256_castps_si256(pos_and_larger));
-                let mask = _mm256_srli_epi32(mask, 31);
+                let vmax = mmax!(
+                    mmax!(mmax!(v0, v1), mmax!(v2, v3)),
+                    mmax!(mmax!(v4, v5), mmax!(v6, mmax!(v7, v8)))
+                );
+                let vmin = mmin!(
+                    mmin!(mmin!(v0, v1), mmin!(v2, v3)),
+                    mmin!(mmin!(v4, v5), mmin!(v6, mmin!(v7, v8)))
+                );
+                let le_all = _mm256_and_ps(le_all, _mm256_cmp_ps::<_CMP_LE_OQ>(val, vmin));
+                let ge_all = _mm256_and_ps(ge_all, _mm256_cmp_ps::<_CMP_GE_OQ>(val, vmax));
+
+                let v0 = _mm256_loadu_ps(p2.offset(y * nx + x - 1)); // left
+                let v1 = _mm256_loadu_ps(p2.offset(y * nx + x));
+                let v2 = _mm256_loadu_ps(p2.offset(y * nx + x + 1)); // right
+                let v3 = _mm256_loadu_ps(p2.offset((y - 1) * nx + x - 1)); // above left
+                let v4 = _mm256_loadu_ps(p2.offset((y - 1) * nx + x)); // above
+                let v5 = _mm256_loadu_ps(p2.offset((y - 1) * nx + x + 1)); // above right
+                let v6 = _mm256_loadu_ps(p2.offset((y + 1) * nx + x - 1)); // below left
+                let v7 = _mm256_loadu_ps(p2.offset((y + 1) * nx + x)); // below
+                let v8 = _mm256_loadu_ps(p2.offset((y + 1) * nx + x + 1)); // below right
+
+                let vmax = mmax!(
+                    mmax!(mmax!(v0, v1), mmax!(v2, v3)),
+                    mmax!(mmax!(v4, v5), mmax!(v6, mmax!(v7, v8)))
+                );
+                let vmin = mmin!(
+                    mmin!(mmin!(v0, v1), mmin!(v2, v3)),
+                    mmin!(mmin!(v4, v5), mmin!(v6, mmin!(v7, v8)))
+                );
+                let le_all = _mm256_and_ps(le_all, _mm256_cmp_ps::<_CMP_LE_OQ>(val, vmin));
+                let ge_all = _mm256_and_ps(ge_all, _mm256_cmp_ps::<_CMP_GE_OQ>(val, vmax));
+
+                let is_extr = _mm256_or_ps(le_all, ge_all);
 
                 // pack lowest byte of every f32 in mask into 8 bytes
                 let shuf = _mm256_set_epi8(
@@ -266,7 +279,7 @@ unsafe fn local_extrema_avx2(
                     -1, -1, -1, -1, -1, -1, -1, -1, 12, 8, 4, 0,
                 );
 
-                let shuffled = _mm256_shuffle_epi8(mask, shuf);
+                let shuffled = _mm256_shuffle_epi8(_mm256_castps_si256(is_extr), shuf);
                 let packed = _mm256_permutevar8x32_epi32(
                     shuffled,
                     _mm256_set_epi32(-1, -1, -1, -1, -1, -1, 4, 0),
