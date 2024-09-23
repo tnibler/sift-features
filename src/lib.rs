@@ -649,6 +649,8 @@ fn gradient_orientation_histogram(
     // x/y gradients are weighted by their distance from the point at (row, col).
     // grad_weights holds the exponent of the weighting factor in Eq. (20) in [4]
 
+    let width = img.shape()[1];
+    let height = img.shape()[0];
     let mut grads_x: AVec<f32, _> = avec!([32]| 0.; ((2 * radius + 1).pow(2)) as usize);
     let mut grads_y: AVec<f32, _> = avec!([32]| 0.; ((2 * radius + 1).pow(2)) as usize);
     let mut grad_weights: AVec<f32, _> = avec!([32]| 0.; ((2 * radius + 1).pow(2)) as usize);
@@ -658,7 +660,7 @@ fn gradient_orientation_histogram(
             continue;
         }
         let y_img: i64 = i64::from(y) + i64::from(y_patch);
-        if y_img <= 0 || y_img as usize >= img.shape()[0] - 1 {
+        if y_img <= 0 || y_img as usize >= height - 1 {
             continue;
         }
         let y_img = y_img as usize;
@@ -667,21 +669,23 @@ fn gradient_orientation_histogram(
                 continue;
             }
             let x_img = x as isize + x_patch as isize;
-            if x_img <= 0 || x_img as usize >= img.shape()[1] - 1 {
+            if x_img <= 0 || x_img as usize >= width - 1 {
                 continue;
             }
             let x_img = x_img as usize;
-            let dx = img[(y_img, x_img + 1)] - img[(y_img, x_img - 1)];
-            let dy = img[(y_img - 1, x_img)] - img[(y_img + 1, x_img)];
+            let dx = unsafe { img.uget((y_img, x_img + 1)) - img.uget((y_img, x_img - 1)) };
+            let dy = unsafe { img.uget((y_img - 1, x_img)) - img.uget((y_img + 1, x_img)) };
             // The point (0, 0) is not handled by atan2
             if dx == 0. && dy == 0. {
                 continue;
             }
             // squared euclidian distance from (row, col) * weighting factor
             let w = (y_patch * y_patch + x_patch * x_patch) as f32 * grad_weight_scale;
-            grads_x[len] = dx;
-            grads_y[len] = dy;
-            grad_weights[len] = w;
+            unsafe {
+                *grads_x.get_unchecked_mut(len) = dx;
+                *grads_y.get_unchecked_mut(len) = dy;
+                *grad_weights.get_unchecked_mut(len) = w;
+            }
             len += 1;
         }
     }
@@ -841,8 +845,8 @@ unsafe fn gradient_orientation_hist_avx2(
             i32::MIN,
         ),
     ];
-    let mut tmp_bins = [0_i32; 8];
-    let mut tmp_histval = [0_f32; 8];
+    let mut tmp_bins = avec!([32] | 0; 8);
+    let mut tmp_histval = avec!([32] | 0.; 8);
     for i in (0..grads_x.len()).step_by(8) {
         let dist = grads_x.len() - i;
         if dist < 8 {
@@ -855,10 +859,6 @@ unsafe fn gradient_orientation_hist_avx2(
             exp::exp_avx2(w)
         };
         let ori = atan2::atan2_avx2(dx, dy);
-        //println!("dist={dist}");
-        //println!("mask={:?}", std::mem::transmute::<_, [i32; 8]>(mask));
-        //println!("{:?}", dx);
-        //println!("{:?}", dy);
         let mag = {
             let xsq = _mm256_mul_ps(dx, dx);
             let mag2 = _mm256_fmadd_ps(dy, dy, xsq);
@@ -866,14 +866,12 @@ unsafe fn gradient_orientation_hist_avx2(
         };
         let bin = _mm256_round_ps::<_MM_FROUND_TO_NEAREST_INT>(_mm256_mul_ps(bin_angle_step, ori));
         let bin = _mm256_cvtps_epi32(bin);
-        //println!("{:?}", std::mem::transmute::<_, [i32; 8]>(bin));
         //use sign bit of bin to select bin or bin + n_vins
         let bin = _mm256_blendv_ps(
             _mm256_castsi256_ps(bin),
             _mm256_castsi256_ps(_mm256_add_epi32(bin, n_bins)),
             _mm256_castsi256_ps(bin),
         );
-        //println!("{:?}", std::mem::transmute::<_, [i32; 8]>(bin));
         let bin = _mm256_castps_si256(bin);
         // same between bin and bin - n_bins
         let bin = _mm256_blendv_ps(
@@ -881,18 +879,10 @@ unsafe fn gradient_orientation_hist_avx2(
             _mm256_castsi256_ps(_mm256_sub_epi32(bin, n_bins)),
             _mm256_castsi256_ps(_mm256_cmpgt_epi32(bin, n_bins)),
         );
-        //let bin = _mm256_blendv_ps(
-        //    _mm256_castsi256_ps(_mm256_set1_epi32(-2)),
-        //    bin,
-        //    grad_nonzero_mask,
-        //);
-        //println!("{:?}\n", std::mem::transmute::<_, [i32; 8]>(bin));
         let bin = _mm256_castps_si256(bin);
         let bin = _mm256_add_epi32(bin, _mm256_set1_epi32(2));
         _mm256_maskstore_epi32(tmp_bins.as_mut_ptr(), mask, bin);
         let histval = _mm256_mul_ps(w, mag);
-        //println!("wei={:?}", w);
-        //println!("mag={:?}", mag);
         _mm256_maskstore_ps(tmp_histval.as_mut_ptr(), mask, histval);
         for j in 0..8 {
             if j + i > grads_x.len() {
