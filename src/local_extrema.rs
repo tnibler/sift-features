@@ -141,7 +141,7 @@ unsafe fn local_extrema_avx2(
     let ny = arr.shape()[1];
     let nz = arr.shape()[0];
     assert!(nz == 3);
-    let mut scratch = vec![false; 2 * 1024];
+    let mut scratch = vec![0u8; 2 * 1024];
     // a <= 0: a <= b => a - b <= 0
     // a >= 0: a >= b => a - b >= 0
     // a-b, shr 31,  not mask with sign bit
@@ -167,14 +167,20 @@ unsafe fn local_extrema_avx2(
                     buf_idx -= (8 - dist_from_border) as usize;
                 }
                 if (buf_idx + nx as usize) >= scratch.len() {
-                    scratch
-                        .iter()
-                        .take(buf_idx)
-                        .enumerate()
-                        .for_each(|(idx, extr)| {
-                            if *extr {
-                                let ey = (buf_start + idx) / (nx as usize);
-                                let ex = (buf_start + idx) - (nx as usize * ey);
+                    // scan through buffer to process extrema
+                    let tail = buf_idx % 32;
+                    for i in (0..(buf_idx - tail)).step_by(32) {
+                        let extr = _mm256_loadu_si256(scratch.as_ptr().add(i) as *mut __m256i);
+                        let bitmask = _mm256_movemask_epi8(extr);
+                        if bitmask == 0 {
+                            continue;
+                        }
+                        for j in 0..32 {
+                            if (bitmask >> j) & 1 == 1 {
+                                let ey = (buf_start + i + j) / (nx as usize);
+                                let ex = (buf_start + i + j) - (nx as usize * ey);
+                                assert!(ey < ny as usize);
+                                assert!(ex < nx as usize);
                                 if let Some(res) = discard_or_interpolate_extremum(
                                     ScaleSpacePoint {
                                         scale,
@@ -187,10 +193,39 @@ unsafe fn local_extrema_avx2(
                                     extrema.push(res);
                                 }
                             }
+                        }
+                    }
+                    scratch[buf_idx - tail..]
+                        .iter()
+                        .take(tail)
+                        .enumerate()
+                        .filter_map(|(idx, extr)| {
+                            if *extr != 0 {
+                                Some(idx + buf_idx - tail)
+                            } else {
+                                None
+                            }
+                        })
+                        .for_each(|idx| {
+                            let ey = (buf_start + idx) / (nx as usize);
+                            let ex = (buf_start + idx) - (nx as usize * ey);
+                            assert!(ey < ny as usize);
+                            assert!(ex < nx as usize);
+                            if let Some(res) = discard_or_interpolate_extremum(
+                                ScaleSpacePoint {
+                                    scale,
+                                    x: ex,
+                                    y: ey,
+                                },
+                                arr,
+                                dog,
+                            ) {
+                                extrema.push(res);
+                            }
                         });
                     buf_start = (y * nx + x) as usize;
                     buf_idx = 0;
-                    scratch.fill(false);
+                    scratch.fill(0);
                 }
                 let val = _mm256_loadu_ps(p1.offset(y * nx + x));
 
@@ -297,14 +332,19 @@ unsafe fn local_extrema_avx2(
     }
     buf_idx -= border;
     assert_eq!(buf_start + buf_idx, (nx as usize) * (ny as usize - border));
-    scratch
-        .iter()
-        .take(buf_idx)
-        .enumerate()
-        .for_each(|(idx, extr)| {
-            if *extr {
-                let ey = (buf_start + idx) / (nx as usize);
-                let ex = (buf_start + idx) - ey * nx as usize;
+    let tail = buf_idx % 32;
+    for i in (0..(buf_idx - tail)).step_by(32) {
+        let extr = _mm256_loadu_si256(scratch.as_ptr().add(i) as *mut __m256i);
+        let bitmask = _mm256_movemask_epi8(extr);
+        if bitmask == 0 {
+            continue;
+        }
+        for j in 0..32 {
+            if (bitmask >> j) & 1 == 1 {
+                let ey = (buf_start + i + j) / (nx as usize);
+                let ex = (buf_start + i + j) - (nx as usize * ey);
+                assert!(ey < ny as usize);
+                assert!(ex < nx as usize);
                 if let Some(res) = discard_or_interpolate_extremum(
                     ScaleSpacePoint {
                         scale,
@@ -316,6 +356,35 @@ unsafe fn local_extrema_avx2(
                 ) {
                     extrema.push(res);
                 }
+            }
+        }
+    }
+    scratch[buf_idx - tail..]
+        .iter()
+        .take(tail)
+        .enumerate()
+        .filter_map(|(idx, extr)| {
+            if *extr != 0 {
+                Some(idx + buf_idx - tail)
+            } else {
+                None
+            }
+        })
+        .for_each(|idx| {
+            let ey = (buf_start + idx) / (nx as usize);
+            let ex = (buf_start + idx) - (nx as usize * ey);
+            assert!(ey < ny as usize);
+            assert!(ex < nx as usize);
+            if let Some(res) = discard_or_interpolate_extremum(
+                ScaleSpacePoint {
+                    scale,
+                    x: ex,
+                    y: ey,
+                },
+                arr,
+                dog,
+            ) {
+                extrema.push(res);
             }
         });
     extrema
