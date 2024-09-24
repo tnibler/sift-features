@@ -337,6 +337,10 @@ unsafe fn raw_descriptor_avx2(
 
     let mut hist = avec!([32] | 0f32; (DESCRIPTOR_N_HISTOGRAMS + 2) * (DESCRIPTOR_N_HISTOGRAMS + 2) * DESCRIPTOR_N_BINS);
 
+    let mut tmp_row_floor_p1 = avec!([32] | 0; 8);
+    let mut tmp_col_floor_p1 = avec!([32] | 0; 8);
+    let mut tmp_ori_floor = avec!([32] | 0; 8);
+
     let index_offsets = _mm256_set_epi32(
         ((DESCRIPTOR_N_HISTOGRAMS + 3) * DESCRIPTOR_N_BINS) as i32,
         ((DESCRIPTOR_N_HISTOGRAMS + 3) * DESCRIPTOR_N_BINS) as i32,
@@ -508,8 +512,11 @@ unsafe fn raw_descriptor_avx2(
 
             let row_floor_p1 = _mm256_cvttps_epi32(_mm256_add_ps(row_floor, onef));
             let col_floor_p1 = _mm256_cvttps_epi32(_mm256_add_ps(col_floor, onef));
-
             let ori_floor = _mm256_cvttps_epi32(ori_floor);
+
+            _mm256_store_si256(tmp_row_floor_p1.as_mut_ptr() as *mut __m256i, row_floor_p1);
+            _mm256_store_si256(tmp_col_floor_p1.as_mut_ptr() as *mut __m256i, col_floor_p1);
+            _mm256_store_si256(tmp_ori_floor.as_mut_ptr() as *mut __m256i, ori_floor);
 
             let msk = {
                 let mut v = [0_i32; 8];
@@ -520,12 +527,10 @@ unsafe fn raw_descriptor_avx2(
                 if msk[j] == 0 {
                     continue;
                 }
-                let jj = _mm256_set1_epi32(j as i32);
                 let ori_alt_ones = _mm256_set_epi32(1, 0, 1, 0, 1, 0, 1, 0);
-                // set every element to ori_floor[j]
-                let row_floor_p1 = _mm256_permutevar8x32_epi32(row_floor_p1, jj);
-                let col_floor_p1 = _mm256_permutevar8x32_epi32(col_floor_p1, jj);
-                let ori_single = _mm256_permutevar8x32_epi32(ori_floor, jj);
+                let row_floor_p1 = _mm256_set1_epi32(tmp_row_floor_p1[j]);
+                let col_floor_p1 = _mm256_set1_epi32(tmp_col_floor_p1[j]);
+                let ori_single = _mm256_set1_epi32(tmp_ori_floor[j]);
 
                 let ori_idx_offset =
                     _mm256_and_si256(_mm256_add_epi32(ori_single, ori_alt_ones), mod_nbins_mask);
