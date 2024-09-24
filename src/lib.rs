@@ -420,7 +420,6 @@ fn keypoints_from_extremum(
         point.y as u32,
         radius,
         LAMBDA_ORI * kp_scale,
-        ORIENTATION_HISTOGRAM_BINS,
     );
     let histogram_max = hist
         .iter()
@@ -640,9 +639,8 @@ fn gradient_orientation_histogram(
     y: u32,
     radius: i32,
     sigma: f32,
-    n_bins: usize,
 ) -> Vec<f32> {
-    assert!(n_bins >= 2);
+    static_assertions::const_assert!(ORIENTATION_HISTOGRAM_BINS >= 2);
     // Denominator of exponent in Eq. (20) in [4], used to compute weights
     let grad_weight_scale = -1.0 / (2.0 * sigma * sigma);
 
@@ -696,7 +694,8 @@ fn gradient_orientation_histogram(
     let grads_y = grads_y;
     let grad_weights = grad_weights;
 
-    let mut raw_hist = vec![0.0; n_bins + 4];
+    let n_bins = ORIENTATION_HISTOGRAM_BINS;
+    let mut raw_hist = [0.0; ORIENTATION_HISTOGRAM_BINS + 4];
     build_orientation_histogram(grads_x, grads_y, grad_weights, n_bins, &mut raw_hist);
 
     // The gradient orientation histogram undergoes a final smoothing step.
