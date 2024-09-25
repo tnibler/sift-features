@@ -48,5 +48,12 @@ name = "opencv-compare"
 required-features = ["opencv"]
 
 [[example]]
+name = "opencv-sift"
+required-features = ["opencv"]
+
+[[example]]
 name = "opencv-cross-match"
 required-features = ["opencv"]
+
+[profile.release]
+debug = true

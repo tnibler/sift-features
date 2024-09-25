@@ -24,7 +24,7 @@ pub fn local_extrema(
     {
         return unsafe { local_extrema_avx2(dogslice, border, value_threshold, scale, dog) };
     }
-    local_extrema_fallback(dogslice, border, value_threshold, scale, dog)
+    //local_extrema_fallback(dogslice, border, value_threshold, scale, dog)
 }
 
 fn local_extrema_fallback(
@@ -143,40 +143,60 @@ unsafe fn local_extrema_avx2(
     assert!(nz == 3);
     // TODO: MUST BE ALIGNED to alignof(u64)
     // bitflags marking extrema for 256 pixel positions
-    let mut extr_flag_acc = [0u8; 32];
+    const ACC_SIZE: usize = 8;
+    let mut extr_flag_acc = [0u8; ACC_SIZE];
+    // we read this acc as u64's
+    static_assertions::const_assert_eq!(ACC_SIZE % 8, 0);
     // number of elements in `extr_flag_acc`
     let mut extr_flag_cnt = 0;
     // position in image corresponding to first bit in `extr_flag_acc`
-    let mut extr_flac_acc_start = border;
+    let mut extr_flac_acc_start = 0;
 
-    // if register of 8 f32's reaches outside of current image row, how many values are in image
-    // bounds
-    let mut use_values: usize;
+    #[rustfmt::skip]
+    let masks: [_; 9] = [
+        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, 0),
+        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, i32::MIN), 
+        _mm256_set_epi32(0, 0, 0, 0, 0, 0, i32::MIN, i32::MIN), 
+        _mm256_set_epi32(0, 0, 0, 0, 0, i32::MIN, i32::MIN, i32::MIN),
+        _mm256_set_epi32(0, 0, 0, 0, i32::MIN, i32::MIN, i32::MIN, i32::MIN),
+        _mm256_set_epi32(0, 0, 0, i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN),
+        _mm256_set_epi32(0, 0, i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN),
+        _mm256_set_epi32(0, i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN),
+        _mm256_set_epi32(i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN), 
+    ];
+    let mut write_mask;
+    let mut load_mask;
 
     use std::arch::x86_64::*;
     let p0 = arr.as_slice().unwrap()[..(ny * nx)].as_ptr();
     let p1 = arr.as_slice().unwrap()[(ny * nx)..(2 * ny * nx)].as_ptr();
     let p2 = arr.as_slice().unwrap()[(2 * ny * nx)..(3 * ny * nx)].as_ptr();
-    let ny = arr.shape()[1] as isize;
-    let nx = arr.shape()[2] as isize;
+    let ny = arr.shape()[1];
+    let nx = arr.shape()[2];
     let mut extrema: Vec<RetainedExtremum> = Vec::default();
     let vvalue_threshold = _mm256_set1_ps(value_threshold);
     let sign_bit_mask = _mm256_castsi256_ps(_mm256_set1_epi32(i32::MAX));
-    for y in (border as isize)..(ny - border as isize) {
-        let mut x = border as isize;
-        use_values = 0;
+    for y in (border)..(ny - border) {
+        let mut x = border;
         let mut last_of_row = false;
 
         extr_flac_acc_start = border;
-        while x < nx - border as isize {
-            let dist_from_border = nx - border as isize - x;
+        write_mask = masks[8];
+        load_mask = masks[8];
+        while x < nx - border {
+            let dist_from_border = nx - border - x;
             if dist_from_border < 8 {
+                write_mask = masks[dist_from_border];
                 last_of_row = true;
                 extr_flag_acc[extr_flag_cnt..].fill(0);
-                x -= 8 - dist_from_border;
-                use_values = dist_from_border as usize;
+                // other possiblity: subtract from x and acc_cnt so we overwrite
+                //x -= 8 - dist_from_border;
             }
-            let val = _mm256_loadu_ps(p1.offset(y * nx + x));
+            let dist_from_oob = nx - x;
+            if dist_from_oob < 8 {
+                load_mask = masks[dist_from_oob];
+            }
+            let val = _mm256_maskload_ps(p1.add(y * nx + x), load_mask);
 
             // zero out sign bit to take absolute value
             let abs = _mm256_and_ps(val, sign_bit_mask);
@@ -192,14 +212,14 @@ unsafe fn local_extrema_avx2(
                     _mm256_min_ps($a, $b)
                 };
             }
-            let v0 = _mm256_loadu_ps(p1.offset(y * nx + x - 1)); // left
-            let v1 = _mm256_loadu_ps(p1.offset(y * nx + x + 1)); // right
-            let v2 = _mm256_loadu_ps(p1.offset((y - 1) * nx + x - 1)); // above left
-            let v3 = _mm256_loadu_ps(p1.offset((y - 1) * nx + x)); // above
-            let v4 = _mm256_loadu_ps(p1.offset((y - 1) * nx + x + 1)); // above right
-            let v5 = _mm256_loadu_ps(p1.offset((y + 1) * nx + x - 1)); // below left
-            let v6 = _mm256_loadu_ps(p1.offset((y + 1) * nx + x)); // below
-            let v7 = _mm256_loadu_ps(p1.offset((y + 1) * nx + x + 1)); // below right
+            let v0 = _mm256_loadu_ps(p1.add(y * nx + x - 1)); // left
+            let v1 = _mm256_loadu_ps(p1.add(y * nx + x + 1)); // right
+            let v2 = _mm256_loadu_ps(p1.add((y - 1) * nx + x - 1)); // above left
+            let v3 = _mm256_loadu_ps(p1.add((y - 1) * nx + x)); // above
+            let v4 = _mm256_loadu_ps(p1.add((y - 1) * nx + x + 1)); // above right
+            let v5 = _mm256_loadu_ps(p1.add((y + 1) * nx + x - 1)); // below left
+            let v6 = _mm256_loadu_ps(p1.add((y + 1) * nx + x)); // below
+            let v7 = _mm256_loadu_ps(p1.add((y + 1) * nx + x + 1)); // below right
 
             // Tree shaped max computation to minimize dependencies between instructions
             let vmax = mmax!(
@@ -213,15 +233,15 @@ unsafe fn local_extrema_avx2(
             let le_all = _mm256_and_ps(gt_thresh, _mm256_cmp_ps::<_CMP_LE_OQ>(val, vmin));
             let ge_all = _mm256_and_ps(gt_thresh, _mm256_cmp_ps::<_CMP_GE_OQ>(val, vmax));
 
-            let v0 = _mm256_loadu_ps(p0.offset(y * nx + x - 1)); // left
-            let v1 = _mm256_loadu_ps(p0.offset(y * nx + x));
-            let v2 = _mm256_loadu_ps(p0.offset(y * nx + x + 1)); // right
-            let v3 = _mm256_loadu_ps(p0.offset((y - 1) * nx + x - 1)); // above left
-            let v4 = _mm256_loadu_ps(p0.offset((y - 1) * nx + x)); // above
-            let v5 = _mm256_loadu_ps(p0.offset((y - 1) * nx + x + 1)); // above right
-            let v6 = _mm256_loadu_ps(p0.offset((y + 1) * nx + x - 1)); // below left
-            let v7 = _mm256_loadu_ps(p0.offset((y + 1) * nx + x)); // below
-            let v8 = _mm256_loadu_ps(p0.offset((y + 1) * nx + x + 1)); // below right
+            let v0 = _mm256_loadu_ps(p0.add(y * nx + x - 1)); // left
+            let v1 = _mm256_loadu_ps(p0.add(y * nx + x));
+            let v2 = _mm256_loadu_ps(p0.add(y * nx + x + 1)); // right
+            let v3 = _mm256_loadu_ps(p0.add((y - 1) * nx + x - 1)); // above left
+            let v4 = _mm256_loadu_ps(p0.add((y - 1) * nx + x)); // above
+            let v5 = _mm256_loadu_ps(p0.add((y - 1) * nx + x + 1)); // above right
+            let v6 = _mm256_loadu_ps(p0.add((y + 1) * nx + x - 1)); // below left
+            let v7 = _mm256_loadu_ps(p0.add((y + 1) * nx + x)); // below
+            let v8 = _mm256_loadu_ps(p0.add((y + 1) * nx + x + 1)); // below right
 
             let vmax = mmax!(
                 mmax!(mmax!(v0, v1), mmax!(v2, v3)),
@@ -234,15 +254,15 @@ unsafe fn local_extrema_avx2(
             let le_all = _mm256_and_ps(le_all, _mm256_cmp_ps::<_CMP_LE_OQ>(val, vmin));
             let ge_all = _mm256_and_ps(ge_all, _mm256_cmp_ps::<_CMP_GE_OQ>(val, vmax));
 
-            let v0 = _mm256_loadu_ps(p2.offset(y * nx + x - 1)); // left
-            let v1 = _mm256_loadu_ps(p2.offset(y * nx + x));
-            let v2 = _mm256_loadu_ps(p2.offset(y * nx + x + 1)); // right
-            let v3 = _mm256_loadu_ps(p2.offset((y - 1) * nx + x - 1)); // above left
-            let v4 = _mm256_loadu_ps(p2.offset((y - 1) * nx + x)); // above
-            let v5 = _mm256_loadu_ps(p2.offset((y - 1) * nx + x + 1)); // above right
-            let v6 = _mm256_loadu_ps(p2.offset((y + 1) * nx + x - 1)); // below left
-            let v7 = _mm256_loadu_ps(p2.offset((y + 1) * nx + x)); // below
-            let v8 = _mm256_loadu_ps(p2.offset((y + 1) * nx + x + 1)); // below right
+            let v0 = _mm256_loadu_ps(p2.add(y * nx + x - 1)); // left
+            let v1 = _mm256_loadu_ps(p2.add(y * nx + x));
+            let v2 = _mm256_loadu_ps(p2.add(y * nx + x + 1)); // right
+            let v3 = _mm256_loadu_ps(p2.add((y - 1) * nx + x - 1)); // above left
+            let v4 = _mm256_loadu_ps(p2.add((y - 1) * nx + x)); // above
+            let v5 = _mm256_loadu_ps(p2.add((y - 1) * nx + x + 1)); // above right
+            let v6 = _mm256_loadu_ps(p2.add((y + 1) * nx + x - 1)); // below left
+            let v7 = _mm256_loadu_ps(p2.add((y + 1) * nx + x)); // below
+            let v8 = _mm256_loadu_ps(p2.add((y + 1) * nx + x + 1)); // below right
 
             let vmax = mmax!(
                 mmax!(mmax!(v0, v1), mmax!(v2, v3)),
@@ -255,21 +275,30 @@ unsafe fn local_extrema_avx2(
             let le_all = _mm256_and_ps(le_all, _mm256_cmp_ps::<_CMP_LE_OQ>(val, vmin));
             let ge_all = _mm256_and_ps(ge_all, _mm256_cmp_ps::<_CMP_GE_OQ>(val, vmax));
 
-            let is_extr = _mm256_or_ps(le_all, ge_all);
+            let is_extr = _mm256_and_ps(
+                _mm256_or_ps(le_all, ge_all),
+                _mm256_castsi256_ps(write_mask),
+            );
 
             extr_flag_acc[extr_flag_cnt] = _mm256_movemask_ps(is_extr).to_le_bytes()[0];
-            extr_flag_cnt += 1;
 
+            extr_flag_cnt += 1;
             if last_of_row {
-                extr_flag_acc[use_values..].fill(0)
+                extr_flag_acc[extr_flag_cnt..].fill(0)
             }
-            if extr_flag_cnt == extr_flag_acc.len() - 1 || last_of_row {
-                for i in (0..extr_flag_acc.len()).step_by(8) {
+            if extr_flag_cnt == extr_flag_acc.len() || last_of_row {
+                // wrong if acc_cnt != 8, if acc not filled compltetely
+                //
+                // solution: use mask to read from image.
+                // same mask to zero out acc segment that we didn't read from
+                // acc[...] = movemask(extr & mask)
+                // acc[cnt..] = 0
+                for i in (0..extr_flag_cnt).step_by(8) {
                     let mut qw = *(extr_flag_acc.as_ptr().add(i) as *const u64);
+                    let qw_start = (extr_flac_acc_start + i * 8) as u64;
                     if qw == 0 {
                         continue;
                     }
-                    let qw_start = (extr_flac_acc_start + i * 8) as u64;
                     while qw != 0 {
                         let trlz = _tzcnt_u64(qw);
                         let extr_x = qw_start + trlz;
@@ -294,9 +323,5 @@ unsafe fn local_extrema_avx2(
             x += 8;
         }
     }
-    assert_eq!(
-        extr_flac_acc_start + extr_flag_cnt,
-        nx as usize - border as usize
-    );
     extrema
 }

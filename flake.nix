@@ -47,7 +47,7 @@
           rust-analyzer
           clang
           llvmPackages.libclang
-          opencv4WithoutCuda
+          # opencv4WithoutCuda
         ];
 
         env = {
