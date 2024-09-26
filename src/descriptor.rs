@@ -5,11 +5,14 @@ use aligned_vec::{avec, AVec, ConstAlign};
 use itertools::{izip, Itertools};
 use ndarray::{s, ArrayView2, ArrayView3, ArrayViewMut3};
 
-use crate::{atan2, DESCRIPTOR_N_BINS, DESCRIPTOR_N_HISTOGRAMS, LAMBDA_DESCR};
+use crate::{atan2, DESCRIPTOR_N_BINS, DESCRIPTOR_N_HISTOGRAMS, DESCRIPTOR_SIZE, LAMBDA_DESCR};
 
 const BIN_ANGLE_STEP: f32 = DESCRIPTOR_N_BINS as f32 / 360.0;
 const DESCRIPTOR_L2_NORM: f32 = 512.0;
 const DESCRIPTOR_MAGNITUDE_CAP: f32 = 0.2;
+
+#[repr(C, align(32))]
+struct AlignArray<T, const N: usize>([T; N]);
 
 pub fn compute_descriptor(
     img: &ArrayView2<f32>,
@@ -213,10 +216,11 @@ fn raw_descriptor(
     // Instead of 4*4 histograms, we work with 5*5 here so that the interpolation works out simpler
     // at the borders (surely possible to do differently as well).
     // The outermost histograms will be discarded.
-    let mut hist_buf =
-        [0.; (DESCRIPTOR_N_HISTOGRAMS + 2) * (DESCRIPTOR_N_HISTOGRAMS + 2) * DESCRIPTOR_N_BINS];
+    let mut hist_buf = AlignArray(
+        [0.; (DESCRIPTOR_N_HISTOGRAMS + 2) * (DESCRIPTOR_N_HISTOGRAMS + 2) * DESCRIPTOR_N_BINS],
+    );
     let mut hist =
-        ArrayViewMut3::from_shape((n_hist + 2, n_hist + 2, DESCRIPTOR_N_BINS), &mut hist_buf)
+        ArrayViewMut3::from_shape((n_hist + 2, n_hist + 2, DESCRIPTOR_N_BINS), &mut hist_buf.0)
             .expect("shape matches");
 
     // Spread each sample point's contribution to its 8 neighbouring histograms based on its distance
@@ -288,7 +292,7 @@ fn raw_descriptor(
         hist[(row_floor_p2, col_floor_p2, ori_floor)] += c110;
         hist[(row_floor_p2, col_floor_p2, ori_floor_p1)] += c111;
     });
-    hist_buf
+    hist_buf.0
 }
 
 #[cfg(all(
@@ -337,12 +341,12 @@ unsafe fn raw_descriptor_avx2(
     let nhist_plus_half = _mm256_set1_ps(nhist as f32 + 0.5);
     let deg_per_rad = _mm256_set1_ps(180. / f32::consts::PI);
 
-    // TODO: must be aligned
-    let mut hist =
-        [0f32; (DESCRIPTOR_N_HISTOGRAMS + 2) * (DESCRIPTOR_N_HISTOGRAMS + 2) * DESCRIPTOR_N_BINS];
-    let mut tmp_row_floor_p1 = [0; 8];
-    let mut tmp_col_floor_p1 = [0; 8];
-    let mut tmp_ori_floor = [0; 8];
+    let mut hist = AlignArray(
+        [0f32; (DESCRIPTOR_N_HISTOGRAMS + 2) * (DESCRIPTOR_N_HISTOGRAMS + 2) * DESCRIPTOR_N_BINS],
+    );
+    let AlignArray(mut tmp_row_floor_p1) = AlignArray([0i32; 8]);
+    let AlignArray(mut tmp_col_floor_p1) = AlignArray([0i32; 8]);
+    let AlignArray(mut tmp_ori_floor) = AlignArray([0i32; 8]);
 
     let index_offsets = _mm256_set_epi32(
         ((DESCRIPTOR_N_HISTOGRAMS + 3) * DESCRIPTOR_N_BINS) as i32,
@@ -359,22 +363,15 @@ unsafe fn raw_descriptor_avx2(
     let bin_angle_step = _mm256_set1_ps(BIN_ANGLE_STEP);
     let n_bins = _mm256_set1_epi32(DESCRIPTOR_N_BINS as i32);
     let mod_nbins_mask = _mm256_set1_epi32(DESCRIPTOR_N_BINS as i32 - 1);
-    // TODO: must be aligned
-    let mut buf = [0.; 8 * 8];
-    let (buf000, buf001, buf010, buf011, buf100, buf101, buf110, buf111) = {
-        let (buf000, sl) = buf.as_mut_slice().split_at_mut(8);
-        let (buf001, sl) = sl.split_at_mut(8);
-        let (buf010, sl) = sl.split_at_mut(8);
-        let (buf011, sl) = sl.split_at_mut(8);
-        let (buf100, sl) = sl.split_at_mut(8);
-        let (buf101, sl) = sl.split_at_mut(8);
-        let (buf110, sl) = sl.split_at_mut(8);
-        let (buf111, sl) = sl.split_at_mut(8);
-        assert_eq!(sl.len(), 0);
-        (
-            buf000, buf001, buf010, buf011, buf100, buf101, buf110, buf111,
-        )
-    };
+
+    let mut buf000 = AlignArray([0f32; 8]);
+    let mut buf001 = AlignArray([0f32; 8]);
+    let mut buf010 = AlignArray([0f32; 8]);
+    let mut buf011 = AlignArray([0f32; 8]);
+    let mut buf100 = AlignArray([0f32; 8]);
+    let mut buf101 = AlignArray([0f32; 8]);
+    let mut buf110 = AlignArray([0f32; 8]);
+    let mut buf111 = AlignArray([0f32; 8]);
 
     let y_winend: i32 = min(radius, height as i32 - 1 - y as i32);
     let y_winstart: i32 = min(y_winend, max(-radius, -(y as i32) + 1));
@@ -505,14 +502,14 @@ unsafe fn raw_descriptor_avx2(
             let c000 = _mm256_sub_ps(c00, c001);
 
             let mask = _mm256_castps_si256(mask);
-            _mm256_storeu_ps(buf000.as_mut_ptr(), c000);
-            _mm256_storeu_ps(buf001.as_mut_ptr(), c001);
-            _mm256_storeu_ps(buf010.as_mut_ptr(), c010);
-            _mm256_storeu_ps(buf011.as_mut_ptr(), c011);
-            _mm256_storeu_ps(buf100.as_mut_ptr(), c100);
-            _mm256_storeu_ps(buf101.as_mut_ptr(), c101);
-            _mm256_storeu_ps(buf110.as_mut_ptr(), c110);
-            _mm256_storeu_ps(buf111.as_mut_ptr(), c111);
+            _mm256_store_ps(buf000.0.as_mut_ptr(), c000);
+            _mm256_store_ps(buf001.0.as_mut_ptr(), c001);
+            _mm256_store_ps(buf010.0.as_mut_ptr(), c010);
+            _mm256_store_ps(buf011.0.as_mut_ptr(), c011);
+            _mm256_store_ps(buf100.0.as_mut_ptr(), c100);
+            _mm256_store_ps(buf101.0.as_mut_ptr(), c101);
+            _mm256_store_ps(buf110.0.as_mut_ptr(), c110);
+            _mm256_store_ps(buf111.0.as_mut_ptr(), c111);
 
             let row_floor_p1 = _mm256_cvttps_epi32(_mm256_add_ps(row_floor, onef));
             let col_floor_p1 = _mm256_cvttps_epi32(_mm256_add_ps(col_floor, onef));
@@ -523,18 +520,18 @@ unsafe fn raw_descriptor_avx2(
             _mm256_store_si256(tmp_ori_floor.as_mut_ptr() as *mut __m256i, ori_floor);
 
             let msk = {
-                let mut v = [0_i32; 8];
-                _mm256_storeu_si256(v.as_mut_ptr() as *mut __m256i, mask);
+                let mut v = AlignArray([0i32; 8]);
+                _mm256_store_si256(v.0.as_mut_ptr() as *mut __m256i, mask);
                 v
             };
             for j in 0..8 {
-                if *msk.get_unchecked(j) == 0 {
+                if *msk.0.get_unchecked(j) == 0 {
                     continue;
                 }
                 let ori_alt_ones = _mm256_set_epi32(1, 0, 1, 0, 1, 0, 1, 0);
-                let row_floor_p1 = _mm256_set1_epi32(tmp_row_floor_p1[j]);
-                let col_floor_p1 = _mm256_set1_epi32(tmp_col_floor_p1[j]);
-                let ori_single = _mm256_set1_epi32(tmp_ori_floor[j]);
+                let row_floor_p1 = _mm256_set1_epi32(*tmp_row_floor_p1.get_unchecked(j));
+                let col_floor_p1 = _mm256_set1_epi32(*tmp_col_floor_p1.get_unchecked(j));
+                let ori_single = _mm256_set1_epi32(*tmp_ori_floor.get_unchecked(j));
 
                 let ori_idx_offset =
                     _mm256_and_si256(_mm256_add_epi32(ori_single, ori_alt_ones), mod_nbins_mask);
@@ -550,21 +547,29 @@ unsafe fn raw_descriptor_avx2(
                     v
                 };
 
-                *hist.get_unchecked_mut(*idx.get_unchecked(0) as usize) += *buf000.get_unchecked(j);
-                *hist.get_unchecked_mut(*idx.get_unchecked(1) as usize) += *buf001.get_unchecked(j);
-                *hist.get_unchecked_mut(*idx.get_unchecked(2) as usize) += *buf010.get_unchecked(j);
-                *hist.get_unchecked_mut(*idx.get_unchecked(3) as usize) += *buf011.get_unchecked(j);
-                *hist.get_unchecked_mut(*idx.get_unchecked(4) as usize) += *buf100.get_unchecked(j);
-                *hist.get_unchecked_mut(*idx.get_unchecked(5) as usize) += *buf101.get_unchecked(j);
-                *hist.get_unchecked_mut(*idx.get_unchecked(6) as usize) += *buf110.get_unchecked(j);
-                *hist.get_unchecked_mut(*idx.get_unchecked(7) as usize) += *buf111.get_unchecked(j);
+                *hist.0.get_unchecked_mut(*idx.get_unchecked(0) as usize) +=
+                    *buf000.0.get_unchecked(j);
+                *hist.0.get_unchecked_mut(*idx.get_unchecked(1) as usize) +=
+                    *buf001.0.get_unchecked(j);
+                *hist.0.get_unchecked_mut(*idx.get_unchecked(2) as usize) +=
+                    *buf010.0.get_unchecked(j);
+                *hist.0.get_unchecked_mut(*idx.get_unchecked(3) as usize) +=
+                    *buf011.0.get_unchecked(j);
+                *hist.0.get_unchecked_mut(*idx.get_unchecked(4) as usize) +=
+                    *buf100.0.get_unchecked(j);
+                *hist.0.get_unchecked_mut(*idx.get_unchecked(5) as usize) +=
+                    *buf101.0.get_unchecked(j);
+                *hist.0.get_unchecked_mut(*idx.get_unchecked(6) as usize) +=
+                    *buf110.0.get_unchecked(j);
+                *hist.0.get_unchecked_mut(*idx.get_unchecked(7) as usize) +=
+                    *buf111.0.get_unchecked(j);
             }
             // TODO: make sure this is a shift
             pix_idx = _mm256_add_epi32(pix_idx, _mm256_set1_epi32(8));
         }
         pix_idx_rowstart = _mm256_add_epi32(pix_idx_rowstart, vwidth);
     }
-    hist
+    hist.0
 }
 
 #[cfg(all(
