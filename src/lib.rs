@@ -809,7 +809,8 @@ fn build_orientation_histogram(
     target_feature = "avx2",
     target_feature = "fma"
 ))]
-#[inline(always)]
+//#[inline(always)]
+#[no_mangle]
 unsafe fn gradient_orientation_hist_avx2(
     grads_x: &[f32],
     grads_y: &[f32],
@@ -818,46 +819,29 @@ unsafe fn gradient_orientation_hist_avx2(
     bin_angle_step: f32,
     raw_hist: &mut [f32],
 ) {
-    assert_eq!(grads_x.len(), grads_y.len());
-    assert_eq!(grads_x.len(), grad_weights.len());
-    assert_eq!(raw_hist.len(), n_bins + 4);
-    assert_eq!(grads_x.as_ptr() as usize % 32, 0);
-    assert_eq!(grads_y.as_ptr() as usize % 32, 0);
-    assert_eq!(grad_weights.as_ptr() as usize % 32, 0);
+    //assert_eq!(grads_x.len(), grads_y.len());
+    //assert_eq!(grads_x.len(), grad_weights.len());
+    //assert_eq!(raw_hist.len(), n_bins + 4);
+    //assert_eq!(grads_x.as_ptr() as usize % 32, 0);
+    //assert_eq!(grads_y.as_ptr() as usize % 32, 0);
+    //assert_eq!(grad_weights.as_ptr() as usize % 32, 0);
     use std::arch::x86_64::*;
     let bin_angle_step = _mm256_set1_ps(bin_angle_step);
     let n_bins = _mm256_set1_epi32(n_bins as i32);
-    let mut mask = _mm256_set1_epi32(i32::MIN);
+    let mut mask = _mm256_set1_epi32(-1);
+    #[rustfmt::skip]
     let masks: [_; 8] = [
-        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, 0),
-        _mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, i32::MIN),
-        _mm256_set_epi32(0, 0, 0, 0, 0, 0, i32::MIN, i32::MIN),
-        _mm256_set_epi32(0, 0, 0, 0, 0, i32::MIN, i32::MIN, i32::MIN),
-        _mm256_set_epi32(0, 0, 0, 0, i32::MIN, i32::MIN, i32::MIN, i32::MIN),
-        _mm256_set_epi32(0, 0, 0, i32::MIN, i32::MIN, i32::MIN, i32::MIN, i32::MIN),
-        _mm256_set_epi32(
-            0,
-            0,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-        ),
-        _mm256_set_epi32(
-            0,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-            i32::MIN,
-        ),
+        _mm256_set_epi32(0,  0,  0,  0,  0,  0,  0,  0),
+        _mm256_set_epi32(0,  0,  0,  0,  0,  0,  0, -1),
+        _mm256_set_epi32(0,  0,  0,  0,  0,  0, -1, -1),
+        _mm256_set_epi32(0,  0,  0,  0,  0, -1, -1, -1),
+        _mm256_set_epi32(0,  0,  0,  0, -1, -1, -1, -1),
+        _mm256_set_epi32(0,  0,  0, -1, -1, -1, -1, -1),
+        _mm256_set_epi32(0,  0, -1, -1, -1, -1, -1, -1),
+        _mm256_set_epi32(0, -1, -1, -1, -1, -1, -1, -1),
     ];
-    let mut tmp_bins = avec!([32] | 0; 8);
-    let mut tmp_histval = avec!([32] | 0.; 8);
+    let mut tmp_bins = AlignArray([0; 8]);
+    let mut tmp_histval = AlignArray([0.; 8]);
     for i in (0..grads_x.len()).step_by(8) {
         let dist = grads_x.len() - i;
         if dist < 8 {
@@ -866,14 +850,14 @@ unsafe fn gradient_orientation_hist_avx2(
         let dx = _mm256_maskload_ps(grads_x.as_ptr().add(i), mask);
         let dy = _mm256_maskload_ps(grads_y.as_ptr().add(i), mask);
         let w = {
-            let w = _mm256_maskload_ps(&grad_weights[i], mask);
+            let w = _mm256_maskload_ps(grad_weights.as_ptr().add(i), mask);
             exp::exp_avx2(w)
         };
         let ori = atan2::atan2_avx2(dx, dy);
         let mag = {
             let xsq = _mm256_mul_ps(dx, dx);
             let mag2 = _mm256_fmadd_ps(dy, dy, xsq);
-            _mm256_sqrt_ps(mag2)
+            _mm256_mul_ps(_mm256_rsqrt_ps(mag2), mag2)
         };
         let bin = _mm256_round_ps::<_MM_FROUND_TO_NEAREST_INT>(_mm256_mul_ps(bin_angle_step, ori));
         let bin = _mm256_cvtps_epi32(bin);
@@ -892,14 +876,17 @@ unsafe fn gradient_orientation_hist_avx2(
         );
         let bin = _mm256_castps_si256(bin);
         let bin = _mm256_add_epi32(bin, _mm256_set1_epi32(2));
-        _mm256_maskstore_epi32(tmp_bins.as_mut_ptr(), mask, bin);
+        _mm256_store_si256(
+            tmp_bins.0.as_mut_ptr() as *mut __m256i,
+            _mm256_and_si256(bin, mask),
+        );
         let histval = _mm256_mul_ps(w, mag);
-        _mm256_maskstore_ps(tmp_histval.as_mut_ptr(), mask, histval);
+        _mm256_store_ps(
+            tmp_histval.0.as_mut_ptr(),
+            _mm256_and_ps(histval, _mm256_castsi256_ps(mask)),
+        );
         for j in 0..8 {
-            if j + i > grads_x.len() {
-                break;
-            }
-            *raw_hist.get_unchecked_mut(tmp_bins[j] as usize) += tmp_histval[j];
+            *raw_hist.get_unchecked_mut(tmp_bins.0[j] as usize) += tmp_histval.0[j];
         }
     }
 }
