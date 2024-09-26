@@ -130,6 +130,9 @@ const DESCRIPTOR_N_BINS: usize = 8;
 pub const DESCRIPTOR_SIZE: usize =
     DESCRIPTOR_N_HISTOGRAMS * DESCRIPTOR_N_HISTOGRAMS * DESCRIPTOR_N_BINS;
 
+#[repr(C, align(32))]
+struct AlignArray<T, const N: usize>([T; N]);
+
 type LumaFImage = ImageBuffer<Luma<f32>, Vec<f32>>;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

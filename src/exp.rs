@@ -45,7 +45,7 @@ const P4: f32 = 0.16666665;
 const P5: f32 = 0.5;
 
 #[inline(always)]
-fn exp_single(x: f32) -> f32 {
+pub fn exp_single(x: f32) -> f32 {
     let x = x.clamp(EXP_LO, EXP_HI);
     let fx = (x * f32::consts::LOG2_E).round();
     let z = fx * f32::consts::LN_2;
