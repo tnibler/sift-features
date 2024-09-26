@@ -19,12 +19,13 @@ pub fn local_extrema(
     #[cfg(all(
         target_arch = "x86_64",
         target_feature = "avx2",
-        target_feature = "fma"
+        target_feature = "fma",
+        target_feature = "bmi1"
     ))]
     {
         return unsafe { local_extrema_avx2(dogslice, border, value_threshold, scale, dog) };
     }
-    //local_extrema_fallback(dogslice, border, value_threshold, scale, dog)
+    local_extrema_fallback(dogslice, border, value_threshold, scale, dog)
 }
 
 fn local_extrema_fallback(
@@ -125,7 +126,8 @@ fn local_extrema_fallback(
 #[cfg(all(
     target_arch = "x86_64",
     target_feature = "avx2",
-    target_feature = "fma"
+    target_feature = "fma",
+    target_feature = "bmi1",
 ))]
 unsafe fn local_extrema_avx2(
     arr: &ArrayView3<f32>,
@@ -143,14 +145,14 @@ unsafe fn local_extrema_avx2(
     assert!(nz == 3);
     // TODO: MUST BE ALIGNED to alignof(u64)
     // bitflags marking extrema for 256 pixel positions
-    const ACC_SIZE: usize = 8;
+    const ACC_SIZE: usize = 32;
     let mut extr_flag_acc = [0u8; ACC_SIZE];
     // we read this acc as u64's
     static_assertions::const_assert_eq!(ACC_SIZE % 8, 0);
     // number of elements in `extr_flag_acc`
     let mut extr_flag_cnt = 0;
     // position in image corresponding to first bit in `extr_flag_acc`
-    let mut extr_flac_acc_start = 0;
+    let mut extr_flag_acc_start = 0;
 
     #[rustfmt::skip]
     let masks: [_; 9] = [
@@ -168,6 +170,7 @@ unsafe fn local_extrema_avx2(
     let mut load_mask;
 
     use std::arch::x86_64::*;
+
     let p0 = arr.as_slice().unwrap()[..(ny * nx)].as_ptr();
     let p1 = arr.as_slice().unwrap()[(ny * nx)..(2 * ny * nx)].as_ptr();
     let p2 = arr.as_slice().unwrap()[(2 * ny * nx)..(3 * ny * nx)].as_ptr();
@@ -180,21 +183,20 @@ unsafe fn local_extrema_avx2(
         let mut x = border;
         let mut last_of_row = false;
 
-        extr_flac_acc_start = border;
+        extr_flag_acc_start = border;
         write_mask = masks[8];
         load_mask = masks[8];
         while x < nx - border {
-            let dist_from_border = nx - border - x;
-            if dist_from_border < 8 {
-                write_mask = masks[dist_from_border];
+            if x + 8 >= nx - border {
+                let dist_from_border = nx - border - x;
+                //write_mask = masks[dist_from_border];
+                write_mask = *masks.get_unchecked(dist_from_border);
                 last_of_row = true;
-                extr_flag_acc[extr_flag_cnt..].fill(0);
-                // other possiblity: subtract from x and acc_cnt so we overwrite
-                //x -= 8 - dist_from_border;
-            }
-            let dist_from_oob = nx - x;
-            if dist_from_oob < 8 {
-                load_mask = masks[dist_from_oob];
+                let dist_from_oob = nx - x;
+                if dist_from_oob < 8 {
+                    load_mask = masks[dist_from_oob];
+                    //load_mask = *masks.get_unchecked(dist_from_oob);
+                }
             }
             let val = _mm256_maskload_ps(p1.add(y * nx + x), load_mask);
 
@@ -280,33 +282,42 @@ unsafe fn local_extrema_avx2(
                 _mm256_castsi256_ps(write_mask),
             );
 
-            extr_flag_acc[extr_flag_cnt] = _mm256_movemask_ps(is_extr).to_le_bytes()[0];
+            //println!(
+            //    "{extr_flag_cnt}, {:08b}, x={x}, y={y}",
+            //    _mm256_movemask_ps(is_extr).to_le_bytes()[0]
+            //);
+            *extr_flag_acc.get_unchecked_mut(extr_flag_cnt) =
+                _mm256_movemask_ps(is_extr).to_le_bytes()[0];
 
             extr_flag_cnt += 1;
-            if last_of_row {
-                extr_flag_acc[extr_flag_cnt..].fill(0)
-            }
             if extr_flag_cnt == extr_flag_acc.len() || last_of_row {
-                // wrong if acc_cnt != 8, if acc not filled compltetely
-                //
-                // solution: use mask to read from image.
-                // same mask to zero out acc segment that we didn't read from
-                // acc[...] = movemask(extr & mask)
-                // acc[cnt..] = 0
                 for i in (0..extr_flag_cnt).step_by(8) {
                     let mut qw = *(extr_flag_acc.as_ptr().add(i) as *const u64);
-                    let qw_start = (extr_flac_acc_start + i * 8) as u64;
                     if qw == 0 {
                         continue;
                     }
+                    //println!("i={i}");
+                    //println!("acccnt={extr_flag_cnt}");
+                    //println!("qwraw={qw:064b}");
+                    if i == extr_flag_cnt - 8 {
+                        qw >>= (8 - (extr_flag_cnt % 8)) * 8;
+                    }
+                    //println!("qw   ={qw:064b}");
+                    let qw_start = (extr_flag_acc_start + i * 8) as u64;
                     while qw != 0 {
-                        let trlz = _tzcnt_u64(qw);
+                        let trlz = _mm_tzcnt_64(qw) as u64;
                         let extr_x = qw_start + trlz;
+                        //println!("qw   ={qw:064b}");
+                        //println!("trlz={trlz}");
+                        //if nx == 50 && scale == 1 && extr_x == 131 {
+                        //    println!("y={y}, x={x}");
+                        //    println!("qwstart={qw_start}, qw={qw:064b}");
+                        //}
                         if let Some(extr) = discard_or_interpolate_extremum(
                             ScaleSpacePoint {
                                 scale,
                                 x: extr_x as usize,
-                                y: y as usize,
+                                y,
                             },
                             arr,
                             dog,
@@ -314,10 +325,13 @@ unsafe fn local_extrema_avx2(
                             extrema.push(extr);
                         }
                         qw ^= 1 << trlz;
+                        //println!("qw   ={qw:064b} after toggle bit");
                     }
+                    //println!();
                 }
-                extr_flac_acc_start = x as usize + 8;
+                extr_flag_acc_start = x + 8;
                 extr_flag_cnt = 0;
+                extr_flag_acc.fill(0);
             }
 
             x += 8;

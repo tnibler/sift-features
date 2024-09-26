@@ -92,7 +92,7 @@ fn raw_descriptor(
     y: f32,
     scale: f32,
     orientation: f32,
-) -> AVec<f32, ConstAlign<32>> {
+) -> [f32; 288] {
     #[cfg(all(
         target_arch = "x86_64",
         target_feature = "avx2",
@@ -209,11 +209,12 @@ fn raw_descriptor(
             .map(|(x, y)| (x * x + y * y).sqrt()),
     );
 
+    // TODO: must be aligned
     // Instead of 4*4 histograms, we work with 5*5 here so that the interpolation works out simpler
     // at the borders (surely possible to do differently as well).
     // The outermost histograms will be discarded.
-    let mut hist_buf: AVec<f32, ConstAlign<ALIGN>> =
-        avec!([ALIGN] | 0.; (n_hist + 2) * (n_hist + 2) * DESCRIPTOR_N_BINS);
+    let mut hist_buf =
+        [0.; (DESCRIPTOR_N_HISTOGRAMS + 2) * (DESCRIPTOR_N_HISTOGRAMS + 2) * DESCRIPTOR_N_BINS];
     let mut hist =
         ArrayViewMut3::from_shape((n_hist + 2, n_hist + 2, DESCRIPTOR_N_BINS), &mut hist_buf)
             .expect("shape matches");
@@ -295,13 +296,14 @@ fn raw_descriptor(
     target_feature = "avx2",
     target_feature = "fma"
 ))]
+#[inline(always)]
 unsafe fn raw_descriptor_avx2(
     img: &ArrayView2<f32>,
     x: f32,
     y: f32,
     scale: f32,
     orientation: f32,
-) -> AVec<f32, ConstAlign<32>> {
+) -> [f32; 288] {
     use std::arch::x86_64::*;
 
     use crate::exp;
@@ -335,11 +337,12 @@ unsafe fn raw_descriptor_avx2(
     let nhist_plus_half = _mm256_set1_ps(nhist as f32 + 0.5);
     let deg_per_rad = _mm256_set1_ps(180. / f32::consts::PI);
 
-    let mut hist = avec!([32] | 0f32; (DESCRIPTOR_N_HISTOGRAMS + 2) * (DESCRIPTOR_N_HISTOGRAMS + 2) * DESCRIPTOR_N_BINS);
-
-    let mut tmp_row_floor_p1 = avec!([32] | 0; 8);
-    let mut tmp_col_floor_p1 = avec!([32] | 0; 8);
-    let mut tmp_ori_floor = avec!([32] | 0; 8);
+    // TODO: must be aligned
+    let mut hist =
+        [0f32; (DESCRIPTOR_N_HISTOGRAMS + 2) * (DESCRIPTOR_N_HISTOGRAMS + 2) * DESCRIPTOR_N_BINS];
+    let mut tmp_row_floor_p1 = [0; 8];
+    let mut tmp_col_floor_p1 = [0; 8];
+    let mut tmp_ori_floor = [0; 8];
 
     let index_offsets = _mm256_set_epi32(
         ((DESCRIPTOR_N_HISTOGRAMS + 3) * DESCRIPTOR_N_BINS) as i32,
@@ -356,7 +359,8 @@ unsafe fn raw_descriptor_avx2(
     let bin_angle_step = _mm256_set1_ps(BIN_ANGLE_STEP);
     let n_bins = _mm256_set1_epi32(DESCRIPTOR_N_BINS as i32);
     let mod_nbins_mask = _mm256_set1_epi32(DESCRIPTOR_N_BINS as i32 - 1);
-    let mut buf: AVec<f32, ConstAlign<32>> = avec!([32]| 0.; 8 * 8);
+    // TODO: must be aligned
+    let mut buf = [0.; 8 * 8];
     let (buf000, buf001, buf010, buf011, buf100, buf101, buf110, buf111) = {
         let (buf000, sl) = buf.as_mut_slice().split_at_mut(8);
         let (buf001, sl) = sl.split_at_mut(8);
@@ -397,7 +401,7 @@ unsafe fn raw_descriptor_avx2(
             let x_abs = x_abs as u32;
             assert!(x_abs < width - 1);
             let mask = if (x_abs + 8) as i32 > x_winend + x as i32 {
-                masks[(8 - (x_winend + x as i32 - x_abs as i32)) as usize]
+                *masks.get_unchecked((8 - (x_winend + x as i32 - x_abs as i32)) as usize)
             } else {
                 mask_all
             };
@@ -524,7 +528,7 @@ unsafe fn raw_descriptor_avx2(
                 v
             };
             for j in 0..8 {
-                if msk[j] == 0 {
+                if *msk.get_unchecked(j) == 0 {
                     continue;
                 }
                 let ori_alt_ones = _mm256_set_epi32(1, 0, 1, 0, 1, 0, 1, 0);
@@ -546,14 +550,14 @@ unsafe fn raw_descriptor_avx2(
                     v
                 };
 
-                hist[idx[0] as usize] += buf000[j];
-                hist[idx[1] as usize] += buf001[j];
-                hist[idx[2] as usize] += buf010[j];
-                hist[idx[3] as usize] += buf011[j];
-                hist[idx[4] as usize] += buf100[j];
-                hist[idx[5] as usize] += buf101[j];
-                hist[idx[6] as usize] += buf110[j];
-                hist[idx[7] as usize] += buf111[j];
+                *hist.get_unchecked_mut(*idx.get_unchecked(0) as usize) += *buf000.get_unchecked(j);
+                *hist.get_unchecked_mut(*idx.get_unchecked(1) as usize) += *buf001.get_unchecked(j);
+                *hist.get_unchecked_mut(*idx.get_unchecked(2) as usize) += *buf010.get_unchecked(j);
+                *hist.get_unchecked_mut(*idx.get_unchecked(3) as usize) += *buf011.get_unchecked(j);
+                *hist.get_unchecked_mut(*idx.get_unchecked(4) as usize) += *buf100.get_unchecked(j);
+                *hist.get_unchecked_mut(*idx.get_unchecked(5) as usize) += *buf101.get_unchecked(j);
+                *hist.get_unchecked_mut(*idx.get_unchecked(6) as usize) += *buf110.get_unchecked(j);
+                *hist.get_unchecked_mut(*idx.get_unchecked(7) as usize) += *buf111.get_unchecked(j);
             }
             // TODO: make sure this is a shift
             pix_idx = _mm256_add_epi32(pix_idx, _mm256_set1_epi32(8));
@@ -568,6 +572,7 @@ unsafe fn raw_descriptor_avx2(
     target_feature = "avx2",
     target_feature = "fma"
 ))]
+#[no_mangle]
 unsafe fn normalize_hist_avx2(hist: &mut [f32], out: &mut [u8]) {
     use std::arch::x86_64::*;
     assert!(hist.len() % 8 == 0);
@@ -575,7 +580,7 @@ unsafe fn normalize_hist_avx2(hist: &mut [f32], out: &mut [u8]) {
     // Single component cap computed from L2 norm
     let mut acc = _mm256_setzero_ps();
     for i in (0..hist.len()).step_by(8) {
-        let val = _mm256_loadu_ps(&hist[i]);
+        let val = _mm256_loadu_ps(hist.as_ptr().add(i));
         acc = _mm256_fmadd_ps(val, val, acc);
     }
     let lo = _mm256_castps256_ps128(acc);
@@ -592,7 +597,7 @@ unsafe fn normalize_hist_avx2(hist: &mut [f32], out: &mut [u8]) {
         _mm256_castsi256_ps(_mm256_broadcastsi128_si256(_mm_castps_si128(component_cap)));
     // cap each component to component_cap
     for i in (0..hist.len()).step_by(8) {
-        let val = _mm256_loadu_ps(&hist[i]);
+        let val = _mm256_loadu_ps(hist.as_ptr().add(i));
         let gt_cap = _mm256_cmp_ps::<_CMP_GT_OQ>(val, component_cap);
         let capped = _mm256_blendv_ps(val, component_cap, gt_cap);
         _mm256_storeu_ps(hist.as_mut_ptr().add(i), capped);
@@ -600,7 +605,7 @@ unsafe fn normalize_hist_avx2(hist: &mut [f32], out: &mut [u8]) {
     // normalize l2 norm to DESCRIPTOR_L2_NORM
     let mut acc = _mm256_setzero_ps();
     for i in (0..hist.len()).step_by(8) {
-        let val = _mm256_loadu_ps(&hist[i]);
+        let val = _mm256_loadu_ps(hist.as_ptr().add(i));
         acc = _mm256_fmadd_ps(val, val, acc);
     }
     let lo = _mm256_castps256_ps128(acc);
@@ -615,7 +620,7 @@ unsafe fn normalize_hist_avx2(hist: &mut [f32], out: &mut [u8]) {
     let norm = _mm256_mul_ps(rsqrt, _mm256_set1_ps(DESCRIPTOR_L2_NORM));
     // saturating cast to u8
     for i in (0..hist.len()).step_by(8) {
-        let val = _mm256_loadu_ps(&hist[i]);
+        let val = _mm256_loadu_ps(hist.as_ptr().add(8));
         let valnorm = _mm256_mul_ps(val, norm);
         let valnorm = _mm256_cvtps_epi32(_mm256_round_ps::<_MM_FROUND_TO_NEAREST_INT>(valnorm));
         let gt_255 = _mm256_castsi256_ps(_mm256_cmpgt_epi32(valnorm, _mm256_set1_epi32(255)));

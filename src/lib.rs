@@ -172,6 +172,7 @@ pub fn sift_with_precomputed(
     features_limit: Option<usize>,
 ) -> SiftResult {
     assert_eq!(scale_space.len(), *n_octaves);
+    let start = std::time::Instant::now();
     let mut keypoints: Vec<SiftKeyPoint> = {
         let n_octaves = *n_octaves;
         (0..n_octaves).flat_map(move |octave| {
@@ -183,13 +184,17 @@ pub fn sift_with_precomputed(
         })
     }
     .collect();
+    let tkp = std::time::Instant::now();
     if let Some(limit) = features_limit {
         if limit < keypoints.len() {
+            // FIXME: don't sort here, use n_th element and discard any where contr<nth
             keypoints.sort_unstable_by(|kp1, kp2| kp2.response.total_cmp(&kp1.response));
             keypoints.truncate(limit);
         }
     }
     let desc = compute_descriptors(scale_space, &keypoints);
+    let tdesc = std::time::Instant::now();
+    //println!("{:?}, {:?}", tkp - start, tdesc - tkp);
     SiftResult {
         keypoints: keypoints
             .into_iter()
@@ -492,7 +497,11 @@ fn interpolate_extremum(
     }: ScaleSpacePoint,
 ) -> Option<InterpolateResult> {
     assert!(dog.shape()[0] == SCALES_PER_OCTAVE + 2);
-    assert!(0 < x && x < dog.shape()[2] - 1);
+    assert!(
+        0 < x && x < dog.shape()[2] - 1,
+        "scale={scale}, x={x}, width-1={}",
+        dog.shape()[2] - 1
+    );
     assert!(0 < y && y < dog.shape()[1] - 1);
     for _ in 0..MAX_INTERPOLATION_STEPS {
         let prev = &dog.slice(s![scale - 1, .., ..]);
