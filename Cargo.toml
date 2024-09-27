@@ -31,3 +31,6 @@ harness = false
 name = "descriptor"
 harness = false
 
+[[example]]
+name = "snapshot"
+required-features = ["opencv", "serde"]
