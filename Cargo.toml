@@ -15,13 +15,13 @@ itertools = "0.13.0"
 image = "0.25.2"
 ndarray = "0.16.1"
 nshare = { version = "0.10.0", features = ["image", "ndarray"] }
+serde = { version = "1.0.210", features = ["derive"], optional = true }
+opencv = { version = "0.92.2", optional = true }
 
 [dev-dependencies]
-opencv = "0.92.2"
-serde = { version = "1.0.210", features = ["derive"] }
-ndarray = { version = "0.16.1", features = ["serde"]}
+serde_json = "1.0.128"
+ndarray = { version = "0.16.1", features = ["serde"] }
 divan = "0.1.14"
-insta = { version = "1.40.0", features = ["yaml", "redactions"] }
 
 [[bench]]
 name = "sift"
@@ -31,6 +31,3 @@ harness = false
 name = "descriptor"
 harness = false
 
-[profile.dev.package]
-insta.opt-level = 3
-similar.opt-level = 3

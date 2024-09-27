@@ -31,13 +31,16 @@ use itertools::{izip, Itertools};
 use ndarray::{prelude::*, s, Array2, Array3, Axis};
 use nshare::AsNdarray2;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "opencv"))]
 mod opencv_processing;
-#[cfg(test)]
+#[cfg(any(test, feature = "opencv"))]
 pub use opencv_processing::*;
 
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(test, derive(serde::Serialize))]
+#[cfg_attr(
+    any(test, feature = "serde"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct SiftResult {
     pub keypoints: Vec<KeyPoint>,
     /// Array of shape `(keypoints.len(), 128)` containing the SIFT feature vectors in the same
@@ -46,7 +49,10 @@ pub struct SiftResult {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
-#[cfg_attr(test, derive(serde::Serialize))]
+#[cfg_attr(
+    any(test, feature = "serde"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct KeyPoint {
     pub x: f32,
     pub y: f32,
@@ -1004,53 +1010,4 @@ impl Processing for ImageprocProcessing {
     fn resize_nearest(img: &LumaFImage, width: u32, height: u32) -> LumaFImage {
         resize(img, width, height, FilterType::Nearest)
     }
-}
-
-#[test]
-fn sift_end2end() {
-    fn do_test(img_bytes: &[u8]) -> (Vec<KeyPoint>, Vec<Vec<u8>>) {
-        let img = match image::load_from_memory(img_bytes).unwrap().grayscale() {
-            image::DynamicImage::ImageLuma8(img) => img,
-            _ => panic!("wrong image type"),
-        };
-        let SiftResult {
-            keypoints,
-            descriptors,
-        } = sift_with_processing::<OpenCVProcessing>(&img, None);
-        let argsort = {
-            let mut idxs = keypoints.iter().enumerate().collect_vec();
-            idxs.sort_by(|(_, kp1), (_, kp2)| match kp1.x.total_cmp(&kp2.x) {
-                std::cmp::Ordering::Equal => match kp1.y.total_cmp(&kp2.y) {
-                    std::cmp::Ordering::Equal => kp1.size.total_cmp(&kp2.size),
-                    o => o,
-                },
-                o => o,
-            });
-            idxs.into_iter().map(|(i, _)| i).collect_vec()
-        };
-        let keypoints = argsort.iter().map(|i| keypoints[*i].clone()).collect_vec();
-        let descriptors = argsort
-            .iter()
-            .map(|i| descriptors.row(*i).to_vec())
-            .collect_vec();
-        (keypoints, descriptors)
-    }
-    let tree_bytes = include_bytes!("../images/tree_small.jpg");
-    let (keypoints, descriptors) = do_test(tree_bytes);
-    insta::assert_yaml_snapshot!(
-        keypoints,
-        {
-            ".*" => insta::rounded_redaction(4),
-        }
-    );
-    insta::assert_yaml_snapshot!(descriptors,);
-    let bird_bytes = include_bytes!("../images/bird_small.jpg");
-    let (keypoints, descriptors) = do_test(bird_bytes);
-    insta::assert_yaml_snapshot!(
-        keypoints,
-        {
-            ".*" => insta::rounded_redaction(4),
-        }
-    );
-    insta::assert_yaml_snapshot!(descriptors,);
 }

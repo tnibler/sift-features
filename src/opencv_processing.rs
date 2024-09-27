@@ -1,9 +1,7 @@
 use crate::{LumaFImage, Processing};
 
-#[cfg(test)]
 pub struct OpenCVProcessing;
 
-#[cfg(test)]
 impl OpenCVProcessing {
     fn opencv_resize(img: &LumaFImage, width: u32, height: u32, method: i32) -> LumaFImage {
         use nshare::AsNdarray2;
@@ -35,7 +33,6 @@ impl OpenCVProcessing {
     }
 }
 
-#[cfg(test)]
 impl Processing for OpenCVProcessing {
     fn gaussian_blur(img: &LumaFImage, sigma: f64) -> LumaFImage {
         use nshare::IntoNdarray2;
