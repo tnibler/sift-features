@@ -1,16 +1,20 @@
 use core::f32;
-use std::cmp::{max, min};
+use std::{
+    cmp::{max, min},
+    ops::RangeBounds,
+};
 
 use aligned_vec::{AVec, ConstAlign};
 use itertools::{izip, Itertools};
 use ndarray::{s, ArrayView2, ArrayView3, ArrayViewMut3};
 
-use crate::{atan2, AlignArray, DESCRIPTOR_N_BINS, DESCRIPTOR_N_HISTOGRAMS, DESCRIPTOR_SIZE, LAMBDA_DESCR};
+use crate::{
+    atan2, AlignArray, DESCRIPTOR_N_BINS, DESCRIPTOR_N_HISTOGRAMS, DESCRIPTOR_SIZE, LAMBDA_DESCR,
+};
 
 const BIN_ANGLE_STEP: f32 = DESCRIPTOR_N_BINS as f32 / 360.0;
 const DESCRIPTOR_L2_NORM: f32 = 512.0;
 const DESCRIPTOR_MAGNITUDE_CAP: f32 = 0.2;
-
 
 pub fn compute_descriptor(
     img: &ArrayView2<f32>,
@@ -55,10 +59,12 @@ pub fn compute_descriptor(
         .expect("array is not empty")
         .sqrt();
     let component_cap = l2_uncapped * DESCRIPTOR_MAGNITUDE_CAP;
+    //println!("cap={component_cap}");
 
     // Components of the vector can not be larger than 0.2 * l2_norm
     hist_flat.mapv_inplace(|v| v.min(component_cap));
 
+    //hist_flat.iter().for_each(|v| println!("{v}"));
     let l2_capped = hist_flat
         .iter()
         .copied()
@@ -68,6 +74,7 @@ pub fn compute_descriptor(
         .reduce(|acc: f32, xs| acc + xs)
         .expect("array is not empty")
         .sqrt();
+    println!("{l2_capped}");
 
     let l2_normalizer = DESCRIPTOR_L2_NORM / l2_capped.max(f32::EPSILON);
 
@@ -122,9 +129,15 @@ fn raw_descriptor(
     let mut row_bins: AVec<f32, ConstAlign<ALIGN>> = AVec::with_capacity(ALIGN, cap);
     let mut col_bins: AVec<f32, ConstAlign<ALIGN>> = AVec::with_capacity(ALIGN, cap);
     let mut weights: AVec<f32, ConstAlign<ALIGN>> = AVec::with_capacity(ALIGN, cap);
-    (-radius..=radius)
+
+    // TODO: use windows from avx version
+    let y_winend: i32 = radius + 1;
+    let y_winstart: i32 = -radius;
+    let x_winend: i32 = radius + 1;
+    let x_winstart: i32 = -radius;
+    (y_winstart..y_winend)
         .flat_map(|y_in_window| {
-            (-radius..=radius).filter_map(move |x_in_window| {
+            (x_winstart..x_winend).filter_map(move |x_in_window| {
                 // row and col in the keypoint's coordinates wrt its reference orientation
                 let col_rotated: f32 =
                     x_in_window as f32 * cos_ori_scaled - y_in_window as f32 * sin_ori_scaled;
@@ -322,9 +335,9 @@ unsafe fn raw_descriptor_avx22(
     let (sin_ori, cos_ori) = orientation.to_radians().sin_cos();
     let (sin_ori_scaled, cos_ori_scaled) = (sin_ori / hist_width, cos_ori / hist_width);
 
-    let y_winend: i32 = min(radius, height as i32 - 1 - y as i32);
+    let y_winend: i32 = min(radius + 1, height as i32 - 1 - y as i32);
     let y_winstart: i32 = min(y_winend, max(-radius, -(y as i32) + 1));
-    let x_winend: i32 = min(radius, width as i32 - 1 - x as i32);
+    let x_winend: i32 = min(radius + 1, width as i32 - 1 - x as i32);
     let x_winstart: i32 = min(x_winend, max(-radius, -(x as i32) + 1));
 
     const ALIGN: usize = 32;
@@ -338,12 +351,9 @@ unsafe fn raw_descriptor_avx22(
 
     for y_win in y_winstart..y_winend {
         for x_win in x_winstart..x_winend {
-
             // row and col in the keypoint's coordinates wrt its reference orientation
-            let col_rotated: f32 =
-            x_win as f32 * cos_ori_scaled - y_win as f32 * sin_ori_scaled;
-            let row_rotated: f32 =
-            x_win as f32 * sin_ori_scaled + y_win as f32 * cos_ori_scaled;
+            let col_rotated: f32 = x_win as f32 * cos_ori_scaled - y_win as f32 * sin_ori_scaled;
+            let row_rotated: f32 = x_win as f32 * sin_ori_scaled + y_win as f32 * cos_ori_scaled;
             // Bin here means which of the 4*4 histograms the gradient at this point will
             // contribute to. It is not a bin within a histogram.
             let row_bin = row_rotated + (nhist / 2) as f32;
@@ -352,17 +362,15 @@ unsafe fn raw_descriptor_avx22(
             // coordinates to read pixels from. No resampling here
             let abs_y = y as i32 + y_win;
             let abs_x = x as i32 + x_win;
+            debug_assert!(abs_y > 0 && abs_y < height as i32);
+            debug_assert!(abs_x > 0 && abs_x < width as i32);
 
             // +/- 0.5 to check if the sample would contribute anything to the 4*4 histograms
             // of interest with interpolation.
             if row_bin > -0.5
-            && row_bin < nhist as f32 + 0.5
-            && col_bin > -0.5
-            && col_bin < nhist as f32 + 0.5
-            && abs_y > 0
-            && abs_y < (height - 1) as i32
-            && abs_x > 0
-            && abs_x < (width - 1) as i32
+                && row_bin < nhist as f32 + 0.5
+                && col_bin > -0.5
+                && col_bin < nhist as f32 + 0.5
             {
                 let abs_y = abs_y as usize;
                 let abs_x = abs_x as usize;
@@ -382,9 +390,11 @@ unsafe fn raw_descriptor_avx22(
                 *col_bins.get_unchecked_mut(len) = col_bin;
                 *weights.get_unchecked_mut(len) = weight;
                 len += 1;
-            } 
+            }
         }
     }
+
+    // UP TO HERE ALL OK
 
     let mut hist = AlignArray(
         [0.; (DESCRIPTOR_N_HISTOGRAMS + 2) * (DESCRIPTOR_N_HISTOGRAMS + 2) * DESCRIPTOR_N_BINS],
@@ -516,6 +526,7 @@ unsafe fn raw_descriptor_avx22(
                 v
             };
 
+            // TODO: print indices that get set
             *hist.0.get_unchecked_mut(*idx.get_unchecked(0) as usize) += *buf000.0.get_unchecked(j);
             *hist.0.get_unchecked_mut(*idx.get_unchecked(1) as usize) += *buf001.0.get_unchecked(j);
             *hist.0.get_unchecked_mut(*idx.get_unchecked(2) as usize) += *buf010.0.get_unchecked(j);
@@ -548,11 +559,16 @@ unsafe fn raw_descriptor_avx22(
         let magsq = dx * dx + dy * dy;
         let mag =
             f32::from_bits(_mm_extract_ps::<0>(_mm_rsqrt_ss(_mm_load_ss(&magsq))) as u32) * magsq;
+        let ori = {
+            let deg = atan2::atan2_single(*dx, *dy).to_degrees();
+            let deg = if deg < 0. { deg + 360.0 } else { deg };
+            deg - orientation
+        };
 
         let row_bin = row_bin - 0.5;
         let col_bin = col_bin - 0.5;
         let mag = mag * weight;
-        let ori_bin = orientation * BIN_ANGLE_STEP;
+        let ori_bin = ori * BIN_ANGLE_STEP;
         let row_floor = row_bin.floor();
         let col_floor = col_bin.floor();
         let ori_floor = ori_bin.floor();
@@ -597,6 +613,7 @@ unsafe fn raw_descriptor_avx22(
         } else {
             ori_floor + 1
         };
+        //println!("{}, {}, {}", row_floor_p1, col_floor_p1, ori_floor);
 
         *ndhist.uget_mut((row_floor_p1, col_floor_p1, ori_floor)) += c000;
         *ndhist.uget_mut((row_floor_p1, col_floor_p1, ori_floor_p1)) += c001;
@@ -914,13 +931,13 @@ unsafe fn normalize_hist_avx2(hist: &mut [f32], out: &mut [u8]) {
         _mm_broadcastss_ps(l2norm),
         _mm_set1_ps(DESCRIPTOR_MAGNITUDE_CAP),
     );
+    //println!("{component_cap:?}");
     let component_cap =
         _mm256_castsi256_ps(_mm256_broadcastsi128_si256(_mm_castps_si128(component_cap)));
     // cap each component to component_cap
     for i in (0..hist.len()).step_by(8) {
         let val = _mm256_loadu_ps(hist.as_ptr().add(i));
-        let gt_cap = _mm256_cmp_ps::<_CMP_GT_OQ>(val, component_cap);
-        let capped = _mm256_blendv_ps(val, component_cap, gt_cap);
+        let capped = _mm256_min_ps(val, component_cap);
         _mm256_storeu_ps(hist.as_mut_ptr().add(i), capped);
     }
     // normalize l2 norm to DESCRIPTOR_L2_NORM
@@ -934,14 +951,12 @@ unsafe fn normalize_hist_avx2(hist: &mut [f32], out: &mut [u8]) {
     let red = _mm_add_ps(lo, hi);
     let red = _mm_hadd_ps(red, red);
     let red = _mm_hadd_ps(red, red);
-    let rsqrt = _mm_rsqrt_ss(red);
-    let rsqrt = _mm256_castsi256_ps(_mm256_broadcastsi128_si256(_mm_castps_si128(
-        _mm_broadcastss_ps(rsqrt),
-    )));
+    let rsqrt = _mm_rsqrt_ps(red);
+    let rsqrt = _mm256_castsi256_ps(_mm256_broadcastsi128_si256(_mm_castps_si128(rsqrt)));
     let norm = _mm256_mul_ps(rsqrt, _mm256_set1_ps(DESCRIPTOR_L2_NORM));
     // saturating cast to u8
     for i in (0..hist.len()).step_by(8) {
-        let val = _mm256_loadu_ps(hist.as_ptr().add(8));
+        let val = _mm256_loadu_ps(hist.as_ptr().add(i));
         let valnorm = _mm256_mul_ps(val, norm);
         let valnorm = _mm256_cvtps_epi32(_mm256_round_ps::<_MM_FROUND_TO_NEAREST_INT>(valnorm));
         let gt_255 = _mm256_castsi256_ps(_mm256_cmpgt_epi32(valnorm, _mm256_set1_epi32(255)));

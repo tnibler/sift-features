@@ -45,7 +45,7 @@ pub fn atan2_inplace(xs_out: &mut [f32], ys: &[f32]) {
 }
 
 #[inline(always)]
-fn atan2_single(x: f32, y: f32) -> f32 {
+pub fn atan2_single(x: f32, y: f32) -> f32 {
     assert!(x != 0. || y != 0.);
     let swap = x.abs() < y.abs();
     let a = if swap { x / y } else { y / x };

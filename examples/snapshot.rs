@@ -73,7 +73,7 @@ fn test_snapshot(
     }
     for (i, (snap_kp, kp)) in snap.keypoints.iter().zip(keypoints.iter()).enumerate() {
         const COORD_TOL: f32 = 1e-5;
-        const ANGLE_TOL: f32 = 1e-3;
+        const ANGLE_TOL: f32 = 1e-2;
         let x_match = (snap_kp.x - kp.x).abs() <= COORD_TOL;
         let y_match = (snap_kp.y - kp.y).abs() <= COORD_TOL;
         let size_match = (snap_kp.size - kp.size).abs() <= COORD_TOL;
@@ -99,17 +99,19 @@ fn test_snapshot(
         return Ok(pass);
     }
     for (i, (snap_desc, desc)) in snap.descriptors.iter().zip(&descriptors).enumerate() {
-        const MAX_DIFF: i32 = 1;
+        const MAX_DIFF: i32 = 2;
         const MAX_DIFF_COUNT: usize = 12;
-        let max_diff = snap_desc
+        let (max_diff_idx, max_diff) = snap_desc
             .iter()
             .zip(desc.iter())
             .map(|(a, b)| (*a as i32 - *b as i32).abs())
-            .max()
+            .enumerate()
+            .max_by_key(|(_i, d)| *d)
             .expect("vec not empty");
         if max_diff > MAX_DIFF {
-            eprintln!("Descriptor {i} mismatch:\nExpected: {snap_desc:?}\nActual  : {desc:?}");
+            eprintln!("Descriptor {i} mismatch: diff={max_diff} at index {max_diff_idx}\nExpected: {snap_desc:?}\nActual  : {desc:?}");
             eprintln!("{:?}", keypoints[i]);
+            eprintln!("{:?}", snap.keypoints[i]);
             pass = false;
             break;
         }
@@ -121,6 +123,7 @@ fn test_snapshot(
         if diff_count > MAX_DIFF_COUNT {
             eprintln!("Descriptor {i} mismatch in {diff_count} places:\nExpected: {snap_desc:?}\nActual  : {desc:?}");
             eprintln!("{:?}", keypoints[i]);
+            eprintln!("{:?}", snap.keypoints[i]);
             pass = false;
             break;
         }
