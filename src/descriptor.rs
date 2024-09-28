@@ -518,15 +518,12 @@ unsafe fn raw_descriptor_avx22(
                 _mm256_mullo_epi32(col_floor_p1, n_bins),
             );
             let idx = _mm256_add_epi32(_mm256_add_epi32(idx_base, index_offsets), ori_idx_offset);
-            //println!("{:?}", std::mem::transmute::<_, [u32; 8]>(idx));
-            //println!();
             let idx = {
                 let mut v = [0_i32; 8];
                 _mm256_storeu_si256(v.as_mut_ptr() as *mut __m256i, idx);
                 v
             };
 
-            // TODO: print indices that get set
             *hist.0.get_unchecked_mut(*idx.get_unchecked(0) as usize) += *buf000.0.get_unchecked(j);
             *hist.0.get_unchecked_mut(*idx.get_unchecked(1) as usize) += *buf001.0.get_unchecked(j);
             *hist.0.get_unchecked_mut(*idx.get_unchecked(2) as usize) += *buf010.0.get_unchecked(j);
@@ -613,7 +610,6 @@ unsafe fn raw_descriptor_avx22(
         } else {
             ori_floor + 1
         };
-        //println!("{}, {}, {}", row_floor_p1, col_floor_p1, ori_floor);
 
         *ndhist.uget_mut((row_floor_p1, col_floor_p1, ori_floor)) += c000;
         *ndhist.uget_mut((row_floor_p1, col_floor_p1, ori_floor_p1)) += c001;

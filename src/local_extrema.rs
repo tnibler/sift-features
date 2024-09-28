@@ -299,7 +299,8 @@ unsafe fn local_extrema_avx2(
                     //println!("i={i}");
                     //println!("acccnt={extr_flag_cnt}");
                     //println!("qwraw={qw:064b}");
-                    if i == extr_flag_cnt - 8 {
+                    if i + 8 == extr_flag_cnt && extr_flag_cnt % 8 != 0 {
+                        assert!((extr_flag_cnt % 8) > 0, "{extr_flag_cnt}, {x}, {nx}");
                         qw >>= (8 - (extr_flag_cnt % 8)) * 8;
                     }
                     //println!("qw   ={qw:064b}");

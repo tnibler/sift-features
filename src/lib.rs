@@ -50,10 +50,7 @@ pub use opencv;
 pub use opencv_processing::*;
 
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(
-    any(test, feature = "serde"),
-    derive(serde::Serialize, serde::Deserialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SiftResult {
     pub keypoints: Vec<KeyPoint>,
     /// Array of shape `(keypoints.len(), 128)` containing the SIFT feature vectors in the same
@@ -62,10 +59,7 @@ pub struct SiftResult {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
-#[cfg_attr(
-    any(test, feature = "serde"),
-    derive(serde::Serialize, serde::Deserialize)
-)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct KeyPoint {
     pub x: f32,
     pub y: f32,
@@ -197,7 +191,7 @@ pub fn sift_with_precomputed(
     }
     let desc = compute_descriptors(scale_space, &keypoints);
     let tdesc = std::time::Instant::now();
-    //println!("{:?}, {:?}", tkp - start, tdesc - tkp);
+    println!("{:?}, {:?}, {:?}", tkp - start, tdesc - tkp, tdesc - start);
     SiftResult {
         keypoints: keypoints
             .into_iter()
