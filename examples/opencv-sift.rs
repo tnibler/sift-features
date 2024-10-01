@@ -45,7 +45,7 @@ fn main() -> Result<(), ()> {
     let path1 = &args[1];
     let cvimg1 = opencv::imgcodecs::imread(path1, opencv::imgcodecs::IMREAD_GRAYSCALE).unwrap();
 
-    let mut cvsift = opencv::features2d::SIFT::create_def().unwrap();
+    let mut cvsift = opencv::features2d::SIFT::create(0, 3, 0.04, 10., 1.6, true).unwrap();
     let mut cvkp1 = opencv::core::Vector::new();
     let mut cvdesc1 = Mat::default();
     cvsift
