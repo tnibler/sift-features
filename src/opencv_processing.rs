@@ -15,6 +15,7 @@ impl OpenCVProcessing {
         )
         .unwrap();
         let mut res = Mat::default();
+        //if method == opencv::imgproc::INTER_NEAREST {
         opencv::imgproc::resize(
             &mat,
             &mut res,
@@ -24,6 +25,18 @@ impl OpenCVProcessing {
             method,
         )
         .unwrap();
+        //} else {
+        //    opencv::imgproc::warp_affine(
+        //        &mat,
+        //        &mut res,
+        //        &opencv::core::Mat::from_slice_2d(&[[0.5, 0., 0.], [0., 0.5, 0.]]).unwrap(),
+        //        opencv::core::Size::new(width as i32, height as i32),
+        //        opencv::imgproc::WARP_INVERSE_MAP,
+        //        opencv::core::BorderTypes::BORDER_TRANSPARENT.into(),
+        //        opencv::core::VecN([0.; 4]),
+        //    )
+        //    .unwrap();
+        //}
         LumaFImage::from_vec(
             res.cols() as u32,
             res.rows() as u32,
