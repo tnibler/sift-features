@@ -49,7 +49,8 @@ fn main() -> Result<(), ()> {
         .unwrap()
         + 4;
 
-    let mut cv_sift = features2d::SIFT::create(0, 3, 0.04, 10., 1.6, true).unwrap();
+    let use_precise_upscale = false;
+    let mut cv_sift = features2d::SIFT::create(0, 3, 0.04, 10., 1.6, use_precise_upscale).unwrap();
     println!(
         "{:<20} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5}",
         "File", "Scl", "Avg", "Max", "q50", "q75", "q90"
