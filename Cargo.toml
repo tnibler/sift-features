@@ -22,6 +22,8 @@ opencv = { version = "0.92.2", optional = true }
 serde_json = "1.0.128"
 ndarray = { version = "0.16.1", features = ["serde"] }
 divan = "0.1.14"
+average = "0.15.1"
+opencv = { version = "0.92.2" }
 
 [[bench]]
 name = "sift"
@@ -34,3 +36,7 @@ harness = false
 [[example]]
 name = "snapshot"
 required-features = ["opencv", "serde"]
+
+[[example]]
+name = "match-resized"
+required-features = ["opencv"]
