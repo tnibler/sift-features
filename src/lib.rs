@@ -191,7 +191,7 @@ pub fn sift_with_precomputed(
     }
     let desc = compute_descriptors(scale_space, &keypoints);
     let tdesc = std::time::Instant::now();
-    println!("{:?}, {:?}, {:?}", tkp - start, tdesc - tkp, tdesc - start);
+    //println!("{:?}, {:?}, {:?}", tkp - start, tdesc - tkp, tdesc - start);
     SiftResult {
         keypoints: keypoints
             .into_iter()

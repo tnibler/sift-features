@@ -74,7 +74,6 @@ pub fn compute_descriptor(
         .reduce(|acc: f32, xs| acc + xs)
         .expect("array is not empty")
         .sqrt();
-    println!("{l2_capped}");
 
     let l2_normalizer = DESCRIPTOR_L2_NORM / l2_capped.max(f32::EPSILON);
 
